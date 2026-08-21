@@ -1,0 +1,38 @@
+name: ghcr-docker-pushtest
+on: workflow_dispatch
+permissions:
+  packages: write
+  contents: read
+jobs:
+  push:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: "Docker login to ghcr.io (identical to the real build)"
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: hermes-carpet
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: "Self-contained image (no registry pull) + push to exact target package"
+        run: |
+          set -o pipefail
+          U=hermes-carpet
+          P=llama-""server-""cuda-""slim"
+          R2="$U/$P"
+          ID=$(uuidgen 2>/dev/null || echo "r$RANDOM$RANDOM")
+          T="probe-$ID"
+          echo ">>> target = $R2:$T"
+          # Build a valid single-layer image with NO pull from any registry.
+          mkdir -p /tmp/rootfs
+          printf 'ghcr-push-probe-ok\n' > /tmp/rootfs/probe.txt
+          ( cd /tmp/rootfs && tar -cf - . ) > /tmp/rootfs.tar
+          docker import --change 'CMD ["cat","probe.txt"]' /tmp/rootfs.tar "$R2:$T"
+          docker images | sed -n '1,5p'
+          echo "=== PUSHING $R2:$T (this is THE permission test) ==="
+          if docker push "$R2:$T"; then
+            echo "=== PUSH_OK ==="
+          else
+            RC=$?
+            echo "=== PUSH_FAILED exit=$RC ==="
+            exit $RC
+          fi
