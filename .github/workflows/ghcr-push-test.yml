@@ -1,0 +1,14 @@
+name: ghcr-pusher-test
+on: workflow_dispatch
+permissions:
+  packages: write
+jobs:
+  push:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: |
+          docker pull hello-world
+          docker tag hello-world ghcr.io/hermes-carpe...m:test-push
+          docker login ghcr.io -u "$GITHUB_ACTOR" -p "$GITHUB_TOKEN"
+          docker push ghcr.io/hermes-carpe...m:test-push
+          echo "PUSH OK"
