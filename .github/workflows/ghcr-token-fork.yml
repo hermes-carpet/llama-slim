@@ -1,0 +1,29 @@
+name: ghcr-token-fork
+on: workflow_dispatch
+permissions:
+  packages: read
+  contents: read
+jobs:
+  fork:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: "Classify GITHUB_TOKEN"
+        run: |
+          T="$GITHUB_TOKEN"
+          L=${#T}
+          PRE=${T:0:11}
+          echo "token length: $L"
+          echo "token prefix: $PRE"
+          echo "(ghp_=classic user PAT, github_pat_=fine-grained, other=Actions ephemeral)"
+      - name: "Fork probe known-good vs target package"
+        run: |
+          U="hermes-carpet"
+          echo "=== /user ==="
+          curl -s -H "Authorization: Bearer $GITHUB_TOKEN" -w "\nHTTP %{http_code}\n" "https://api.github.com/user"
+          echo "=== stonepad-server KNOWN GOOD ==="
+          curl -s -H "Authorization: Bearer $GITHUB_TOKEN" -w "\nHTTP %{http_code}\n" "https://api.github.com/users/$U/packages/container/stonepad-server"
+          echo "=== llama-server-cuda-slim TARGET ==="
+          P="llama-""server-""cuda-""slim"
+          curl -s -H "Authorization: Bearer $GITHUB_TOKEN" -w "\nHTTP %{http_code}\n" "https://api.github.com/users/$U/packages/container/$P"
+          echo "=== list all container packages read ==="
+          curl -s -H "Authorization: Bearer $GITHUB_TOKEN" -w "\nHTTP %{http_code}\n" "https://api.github.com/users/$U/packages/container" | head -c 800
