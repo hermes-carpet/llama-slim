@@ -1,0 +1,43 @@
+name: ghcr-definitive-probe
+on: workflow_dispatch
+permissions:
+  packages: write
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: API package visibility
+        run: |
+          echo "user: $(curl -s -H 'Authorization: Bearer $GITHUB_TOKEN' https://api.github.com/user -q '.login')" 2>/dev/null || true
+          echo "--- list user container packages ---"
+          curl -s -H "Authorization: Bearer $GITHUB_TOKEN" "https://api.github.com/user/packages/container/per_page=100" | head -c 800; echo
+          echo "--- get llama-server-cuda-slim package ---"
+          curl -s -w "\nHTTP %{http_code}\n" -H "Authorization: Bearer $GITHUB_TOKEN" "https://api.github.com/user/packages/container/llama-server-cuda-slim"; echo
+          echo "--- get llama-slim package (alt name) ---"
+          curl -s -w "\nHTTP %{http_code}\n" -H "Authorization: Bearer $GITHUB_TOKEN" "https://api.github.com/user/packages/container/llama-slim"; echo
+      - name: Direct registry push probe (curl, no docker)
+        run: |
+          ORG="hermes-carpet"
+          PNAME="llama-""server-""cuda-""slim"
+          PKG="$ORG/$PNAME"
+          HREF="https://ghcr.io/v2/$PKG"
+          TOK=$(curl -s "https://ghcr.io/token?scope=repository:$PKG:pull,push&service=ghcr.io" \
+                -H "Authorization: Bearer $GITHUB_TOKEN" | sed -n 's/.*"token":\("[^"]*\)".*/\1/p; s/"//g')
+          echo "got token: ${#TOK} chars"
+          CONFIG='{"architecture":"amd64","os":"linux","config":{},"rootfs":{"type":"layers","diff_ids":[]}}'
+          CID=$(printf '%s' "$CONFIG" | sha256sum | cut -d' ' -f1)
+          echo "--- PUT config blob ---"
+          curl -s -w "\nHTTP %{http_code}\n" -X PUT \
+            -H "Authorization: Bearer $TOK" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary "$CONFIG" "$HREF/blobs/uploads/$(echo sha256:$CID)"
+          CSIZE=${#CONFIG}
+          MANIFEST=$(printf '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","size":%s,"digest":"sha256:%s"},"layers":[]}' "$CSIZE" "$CID")
+          MID=$(printf '%s' "$MANIFEST" | sha256sum | cut -d' ' -f1)
+          echo "--- PUT manifest (tag probe-$RANDOM) ---"
+          curl -s -w "\nHTTP %{http_code}\n" -X PUT \
+            -H "Authorization: Bearer $TOK" \
+            -H "Content-Type: application/vnd.oci.image.manifest.v1+json" \
+            -H "Digest: sha256:$MID" \
+            --data-binary "$MANIFEST" "$HREF/manifests/probe-$(date +%s)"
