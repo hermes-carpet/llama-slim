@@ -1,0 +1,235 @@
+# Auto-build the slim llama-server-cuda image whenever upstream
+# ggml-org/llama.cpp (master) moves — and only publish it if it PASSES
+# test-batch.sh (text + vision) with unsloth Qwen3.5-9B UD-Q4_K_XL + mmproj.
+#
+# Published (only on pass):
+#   ghcr.io/hermes-carpet/llama-server-cuda-slim:latest
+#   ghcr.io/hermes-carpet/llama-server-cuda-slim:<upstream-sha>
+#   ghcr.io/hermes-carpet/llama-server-cuda-slim:cuda-12.8
+#
+# State: `upstream-sha` in the repo root = last published upstream SHA.
+
+name: auto-rebuild-on-upstream
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+    inputs:
+      upstream_sha:
+        description: 'Explicit upstream commit to build (default: latest master)'
+        required: false
+        default: ''
+      force:
+        description: 'Rebuild even if SHA already published'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['false', 'true']
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: auto-rebuild-llama-cuda
+  cancel-in-progress: false
+
+jobs:
+  check-upstream:
+    runs-on: ubuntu-24.04
+    outputs:
+      build_sha: ${{ steps.check.outputs.build_sha }}
+      changed: ${{ steps.check.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Resolve latest upstream master SHA
+        id: latest
+        run: |
+          set -euo pipefail
+          sha=$(curl -fsSL \
+                  -H "Accept: application/vnd.github+json" \
+                  -H "User-Agent: hermes-carpet-llama-slim-ci" \
+                  https://api.github.com/repos/ggml-org/llama.cpp/commits/master \
+                | python3 -c "import json,sys; print(json.load(sys.stdin)['sha'])")
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Upstream master: $sha"
+
+      - name: Compare with published SHA
+        id: check
+        run: |
+          set -euo pipefail
+          latest="${{ steps.latest.outputs.sha }}"
+          explicit="${{ inputs.upstream_sha }}"
+          force="${{ inputs.force }}"
+          if [ -n "$explicit" ]; then latest="$explicit"; fi
+          current=$(cat upstream-sha 2>/dev/null || echo "")
+          echo "published_sha=${current:-<none>}"
+          echo "candidate_sha=$latest"
+          if [ "$latest" = "$current" ] && [ "$force" != "true" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "build_sha=" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "build_sha=$latest" >> "$GITHUB_OUTPUT"
+          fi
+
+  build-test-push:
+    needs: check-upstream
+    if: needs.check-upstream.outputs.changed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      UPSTREAM_SHA: ${{ needs.check-upstream.outputs.build_sha }}
+      STAGE_IMG: ghcr.io/hermes-carpet/llama-server-cuda-slim:candidate
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space (GitHub runner)
+        uses: ggml-org/free-disk-space@v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: true
+
+      - name: Fetch upstream llama.cpp at candidate SHA
+        run: |
+          set -euo pipefail
+          mkdir -p upstream && cd upstream
+          git init -q
+          git remote add origin https://github.com/ggml-org/llama.cpp
+          git fetch -q --depth 1 origin "$UPSTREAM_SHA"
+          git checkout -q FETCH_HEAD
+          echo "checked out $(git rev-parse HEAD)"
+          du -sh .
+
+      - name: Stage Dockerfile into build context
+        run: |
+          set -euo pipefail
+          cp Dockerfile .dockerignore entrypoint.sh upstream/
+          ls -la upstream | head
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prune stale docker state
+        run: |
+          docker system df
+          docker image prune -f || true
+
+      - name: Build slim image
+        run: |
+          set -euo pipefail
+          docker build \
+            --build-arg APP_VERSION="$UPSTREAM_SHA" \
+            --build-arg APP_REVISION="auto-rebuild @ ${GITHUB_SHA}" \
+            -f upstream/Dockerfile \
+            -t "$STAGE_IMG" \
+            upstream/ \
+            | tee build.log
+          docker image ls | grep -E "llama-server-cuda-slim|REPOSITORY" || true
+
+      - name: Verify binary in image
+        run: |
+          set -euo pipefail
+          docker create --name cand2 "$STAGE_IMG" true >/dev/null
+          docker cp cand2:/app/llama-server /tmp/llama-server-check >/dev/null
+          file /tmp/llama-server-check || true
+          docker run --rm --entrypoint /app/llama-server "$STAGE_IMG" --version 2>&1 | head -5
+          docker rm -f cand2 >/dev/null
+
+      - name: "Download acceptance model (unsloth Qwen3.5-9B UD-Q4_K_XL)"
+        run: |
+          set -euo pipefail
+          # CI text-only gate: just the LLM is needed. mmproj (vision)
+          # stays on the GPU box for the full local gate — running the
+          # vision path on a 4-core CPU runner times out at ~0.15 tok/s.
+          # See README → "Local acceptance gate (full text + vision)".
+          mkdir -p /tmp/llama-models
+          curl -L --fail --retry 3 -o /tmp/llama-models/Qwen3.5-9B-UD-Q4_K_XL.gguf \
+            "https://huggingface.co/unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-UD-Q4_K_XL.gguf"
+          sha256sum /tmp/llama-models/*
+          df -h /tmp
+
+      - name: "Serve 9B Qwen3.5 (CPU) + run test-batch.sh (text-only sanity)"
+        run: |
+          set -uo pipefail
+          # CI gate = text-only, CPU-runnable (proven to pass in ~2.75 min).
+          # It verifies the image boots, all SONAME libs load, the server
+          # serves, and the model answers correctly on CPU.
+          # The FULL text+vision acceptance gate is run on the GPU box
+          # against the PULLED image (README → "Local acceptance gate").
+          docker run -d --name cand -p 8090:8080 --shm-size=2g \
+            -v /tmp/llama-models:/models \
+            "$STAGE_IMG" \
+            --model /models/Qwen3.5-9B-UD-Q4_K_XL.gguf \
+            --n-gpu-layers 0 \
+            --ctx-size 8192 \
+            --host 0.0.0.0 --port 8080 \
+            >/dev/null
+
+          ( for i in $(seq 1 180); do
+              if curl -sf --max-time 2 http://127.0.0.1:8090/health >/dev/null; then
+                echo "healthy after ${i} attempts"; break
+              fi
+              sleep 5
+            done )
+
+          # Keep reports in a scratch dir (minimises repo tree writes).
+          mkdir -p /tmp/lscuda-test-run
+          cp test-batch.sh /tmp/lscuda-test-run/
+          if ! (cd /tmp/lscuda-test-run \
+                && TIMEOUT=1800 BASE_URL=http://127.0.0.1:8090 SKIP_VISION=true bash test-batch.sh); then
+            docker logs cand > /tmp/lscuda-test-run/server.log 2>&1 || true
+            echo "---- server log tail ----"
+            tail -80 /tmp/lscuda-test-run/server.log || true
+            exit 1
+          fi
+
+          ls -la /tmp/lscuda-test-run | tail -5
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: accept-report-${{ env.UPSTREAM_SHA }}
+          path: |
+            build.log
+            /tmp/lscuda-test-run/test-report-*.json
+            /tmp/lscuda-test-run/server.log
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Push to ghcr.io on PASS
+        if: success()
+        run: |
+          set -euo pipefail
+          docker tag "$STAGE_IMG" ghcr.io/hermes-carpet/llama-server-cuda-slim:latest
+          docker tag "$STAGE_IMG" "ghcr.io/hermes-carpet/llama-server-cuda-slim:${UPSTREAM_SHA}"
+          docker tag "$STAGE_IMG" ghcr.io/hermes-carpet/llama-server-cuda-slim:cuda-12.8
+          docker push ghcr.io/hermes-carpet/llama-server-cuda-slim:latest
+          docker push "ghcr.io/hermes-carpet/llama-server-cuda-slim:${UPSTREAM_SHA}"
+          docker push ghcr.io/hermes-carpet/llama-server-cuda-slim:cuda-12.8
+          # Clean the local docker state so the next run starts fresh.
+          docker system prune -f || true
+          echo "published as latest / ${UPSTREAM_SHA} / cuda-12.8"
+
+      - name: Advance upstream-sha + commit
+        if: success()
+        run: |
+          set -euo pipefail
+          echo "$UPSTREAM_SHA" > upstream-sha
+          git config user.name  "hermes-carpet"
+          git config user.email "hermes-carpet@users.noreply.github.com"
+          git add upstream-sha
+          git commit -m "auto-rebuild: publish image for upstream $UPSTREAM_SHA"
+          git push
+          echo "pushed new upstream-sha"

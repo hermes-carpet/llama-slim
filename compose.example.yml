@@ -1,0 +1,32 @@
+# Example compose service for the slim image.
+# Adjust the model paths / inference params to match your workload.
+services:
+  llama:
+    restart: unless-stopped
+    container_name: llama-server
+    image: ghcr.io/hermes-carpet/llama-server-cuda-slim:latest
+    ports:
+      - 8080:8080
+    volumes:
+      # Mount your models directory however you like — the path on the host
+      # is your choice; the container path is /models.
+      - /path/to/your/models:/models
+    environment:
+      - LLAMA_ARG_MODEL=/models/Qwen3.5-9B-UD-Q4_K_XL.gguf
+      - LLAMA_ARG_MMPROJ=/models/unsloth-Qwen3.5-9B-mmproj-BF16.gguf
+      - LLAMA_ARG_N_GPU_LAYERS=99
+      - LLAMA_ARG_CTX_SIZE=65536
+      - LLAMA_ARG_N_PARALLEL=1
+      - LLAMA_ARG_FLASH_ATTN=on
+      - LLAMA_ARG_CACHE_TYPE_K=q4_0
+      - LLAMA_ARG_CACHE_TYPE_V=q4_0
+      - LLAMA_ARG_TEMP=0.6
+      - LLAMA_ARG_TOP_K=20
+      - LLAMA_ARG_TOP_P=0.95
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
