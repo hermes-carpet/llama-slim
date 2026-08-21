@@ -1,0 +1,18 @@
+name: ghcr-pkg-info
+on: workflow_dispatch
+permissions:
+  packages: write
+jobs:
+  info:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: List container packages via GITHUB_TOKEN
+        run: |
+          set +e
+          H="Authorization: Bearer $GITHUB_TOKEN"
+          echo "=== LIST container packages ==="
+          curl -s -H "$H" "https://api.github.com/user/packages/container?per_page=100" | jq -r '.packages[]? | "NAME \(.name) versions=\(.version_count) created=\(.created_at)"'
+          echo "=== SPECIFIC: llama-server-cuda-slim ==="
+          curl -s -w "\n[HTTP %{http_code}]\n" -H "$H" "https://api.github.com/user/packages/container/llama-server-cuda-slim"
+          echo "=== versions ==="
+          curl -s -w "\n[HTTP %{http_code}]\n" -H "$H" "https://api.github.com/user/packages/container/llama-server-cuda-slim/versions?per_page=5"
