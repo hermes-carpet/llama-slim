@@ -6,13 +6,16 @@ jobs:
   info:
     runs-on: ubuntu-24.04
     steps:
-      - name: List container packages via GITHUB_TOKEN
+      - name: Registry API probe
         run: |
           set +e
-          H="Authorization: Bearer $GITHUB_TOKEN"
-          echo "=== LIST container packages ==="
-          curl -s -H "$H" "https://api.github.com/user/packages/container?per_page=100" | jq -r '.packages[]? | "NAME \(.name) versions=\(.version_count) created=\(.created_at)"'
-          echo "=== SPECIFIC: llama-server-cuda-slim ==="
-          curl -s -w "\n[HTTP %{http_code}]\n" -H "$H" "https://api.github.com/user/packages/container/llama-server-cuda-slim"
-          echo "=== versions ==="
-          curl -s -w "\n[HTTP %{http_code}]\n" -H "$H" "https://api.github.com/user/packages/container/llama-server-cuda-slim/versions?per_page=5"
+          check_pkg() {
+            local name="$1"
+            local tok resp
+            tok=$(curl -s -u "hermes-carpe...RET" | jq -r '.token // empty')
+            echo "--- $name : token-len=${#tok}"
+            resp=$(curl -s -w "\nHTTP:%{http_code}" -H "Authorization: Bearer $tok" "https://ghcr.io/v2/hermes-carpe...m/tags/list")
+            echo "$resp"
+          }
+          check_pkg llama-slim-pkg-probe
+          check_pkg stonepad-server
