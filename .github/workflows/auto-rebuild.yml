@@ -327,48 +327,17 @@ jobs:
           # --- prune legacy raw-SHA / one-off tags (pre-semver era) ---
           # Keep: latest, <semver>, cuda-13.3. Everything else (40+ old
           # upstream-SHA tags + any probe tags) is deleted, best-effort.
-          # NOTE: the ghcr.io token endpoint must be *authenticated* with
-          # GITHUB_TOKEN (the package is repo-scoped, anonymous gets 403).
-          # The prune is best-effort: any failure here must NOT mark the run
-          # failed (the push above already succeeded).
-          python3 - <<'PYEOF' || { echo "WARN: tag prune failed (non-fatal)"; exit 0; }
-          import json, os, re, urllib.request
-          repo = "hermes-carpet/llama-server-cuda-slim"
-          keep = re.compile(r"^(latest|\d+\.\d+\.\d+|cuda-13\.3)$")
-          ghtok = os.environ.get("GITHUB_TOKEN", "")
-          def ghcr_token():
-              r = urllib.request.Request(
-                  f"https://ghcr.io/token?service=ghcr.io&scope=repository:{repo}:pull,push",
-                  headers={"Authorization": f"Bearer {ghtok}"})
-              return json.load(urllib.request.urlopen(r, timeout=30))["token"]
-          def req(method, url, tok):
-              r = urllib.request.Request(url, method=method,
-                                          headers={"Authorization": "Bearer " + tok})
-              try:
-                  with urllib.request.urlopen(r, timeout=30) as resp:
-                      return resp.status
-              except urllib.error.HTTPError as e:
-                  return e.code
-          tok = ghcr_token()
-          tags = json.load(urllib.request.urlopen(
-              urllib.request.Request(
-                  f"https://ghcr.io/v2/{repo}/tags/list",
-                  headers={"Authorization": "Bearer " + tok}), timeout=30))["tags"]
-          print(f"tag list: {len(tags)} tags")
-          removed = 0
-          for t in tags:
-              if keep.match(t):
-                  continue
-              code = req("DELETE", f"https://ghcr.io/v2/{repo}/manifests/{t}", tok)
-              if code in (200, 202):
-                  removed += 1
-                  print(f"pruned tag {t}")
-              elif code in (404, 401, 403):
-                  print(f"tag {t}: {code} (skip)")
-              else:
-                  print(f"tag {t}: DELETE -> {code} (non-fatal)")
-          print(f"pruned {removed} legacy tags; remaining set = latest + semver + cuda-13.3")
-          PYEOF
+          #
+          # NOTE: GHCR does NOT implement distribution-spec DELETE —
+          # DELETE /v2/<repo>/manifests/<tag> returns 405 "operation is
+          # unsupported" regardless of token auth/scope. Deletion only
+          # works via the GitHub GraphQL deletePackageVersion mutation,
+          # which needs packages scope (the GITHUB_TOKEN has
+          # `packages: write` for this repo — see the permissions:
+          # block above). Kept non-fatal: the push above already
+          # succeeded, so a prune hiccup must never fail the run.
+          python3 scripts/prune-ghcr-tags.py \
+            || echo "WARN: tag prune did not complete (non-fatal)"
 
           # Clean the local docker state so the next run starts fresh.
           docker system prune -f || true
@@ -383,6 +352,10 @@ jobs:
           git config user.name  "hermes-carpet"
           git config user.email "hermes-carpet@users.noreply.github.com"
           git add upstream-sha release-version
-          git commit -m "auto-rebuild: publish v${RELEASE_VERSION} for upstream $UPSTREAM_SHA"
-          git push
-          echo "pushed new upstream-sha + release-version"
+          if git diff --cached --quiet; then
+            echo "state already current (no new commit); nothing to advance"
+          else
+            git commit -m "auto-rebuild: publish v${RELEASE_VERSION} for upstream $UPSTREAM_SHA"
+            git push
+            echo "pushed new upstream-sha + release-version"
+          fi
