@@ -48,7 +48,19 @@ services:
 ## Why it's smaller / faster to pull
 
 The official `server-cuda` image (as of 2026-08) is a **6.98 GB image** —
-~2.5 GB of transfer on first pull. This image:
+~2.5 GB of transfer on first pull. This image is **1.22 GB on disk
+(~350 MB compressed pull)** because it is *self-contained*: the CUDA 13
+runtime libraries (`libcudart.so.13`, `libcublas.so.13`,
+`libcublasLt.so.13` — the complete closure `llama-server` and
+`libggml-cuda.so` actually link, measured via `objdump` NEEDED entries at
+build time) are baked into a plain `ubuntu:24.04` runtime stage.
+
+The ONLY host requirement is the NVIDIA kernel driver (`libcuda.so.1`,
+injected by `nvidia-container-toolkit`). No CUDA toolkit packages installed
+on the host, no `apt` interaction at runtime, no host `LD_LIBRARY_PATH`
+fiddling. Minor CUDA bumps (13.3 → 13.4) are image-side events only
+(same SONAME `libcudart.so.13`); a major bump (13 → 14) is a clean,
+Dependabot-trackable base-image change.
 
 - **No node/npm build stage.** The embedded web UI is pulled as a
   sha256-verified pre-built bundle from the upstream HF bucket
@@ -61,7 +73,10 @@ The official `server-cuda` image (as of 2026-08) is a **6.98 GB image** —
   cards in the meantime.
 - **No extra tools.** Only `llama-server` ships (no
   `llama-cli` / `llama-completion` / `llama-bench` / `llama-quantize` /
-  llama-tts / export-lora / fit-params / etc.).
+  llama-tts / export-lora / fit-params / etc.) — and their duplicate SONAME
+  symlinks are created at runtime as zero-size links, not copied (the stock
+  builder materializes symlinks as full files, which is how the first slim
+  revision ended up at 3.47 GB).
 - **No CPU variant matrix.** The 16 `libggml-cpu-<arch>.so` blobs in the
   official image (Alder Lake, Zen 4, Sapphire Rapids, …) are replaced
   with a single native CPU backend.
@@ -73,7 +88,9 @@ Measured stock-image bloat (official `server-cuda`, measured 2026-08):
 - `libllama-*-impl.so` for the CLI/bench/quantize tools — ~3 MB
 
 The slim build drops the CPU matrix and the tool impls, and compiles
-llama.cpp for the single default arch above.
+llama.cpp for the single default arch above. cuFFT/NVRTC are *not* linked
+by `ggml-cuda` (verified by source scan + `objdump`), so they are not
+shipped.
 
 ## Acceptance test
 
@@ -136,7 +153,7 @@ On a new upstream SHA it:
 4. **Only if the test passes**, tags and pushes to ghcr.io:
    - `ghcr.io/hermes-carpet/llama-server-cuda-slim:latest`
    - `ghcr.io/hermes-carpet/llama-server-cuda-slim:<upstream-sha>`
-   - `ghcr.io/hermes-carpet/llama-server-cuda-slim:cuda-12.8`
+   - `ghcr.io/hermes-carpet/llama-server-cuda-slim:cuda-13.3`
 5. Commits + pushes the new SHA to `upstream-sha` so the next poll knows
    this upstream commit is already published.
 

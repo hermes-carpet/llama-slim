@@ -1,13 +1,22 @@
-# Auto-build the slim llama-server-cuda image whenever upstream
+# Auto-build the slim llama-server-cuda-slim image whenever upstream
 # ggml-org/llama.cpp (master) moves — and only publish it if it PASSES
-# test-batch.sh (text + vision) with unsloth Qwen3.5-9B UD-Q4_K_XL + mmproj.
+# test-batch.sh (text-only gate in CI; full text+vision locally on the GPU box).
 #
 # Published (only on pass):
 #   ghcr.io/hermes-carpet/llama-server-cuda-slim:latest
-#   ghcr.io/hermes-carpet/llama-server-cuda-slim:<upstream-sha>
-#   ghcr.io/hermes-carpet/llama-server-cuda-slim:cuda-12.8
+#   ghcr.io/hermes-carpet/llama-server-cuda-slim:<semver>     # mirrors upstream release
+#                                                              # (v0.4.0, v0.4.1, ...)
+#   ghcr.io/hermes-carpet/llama-server-cuda-slim:cuda-13.3    # CUDA-major convenience tag
 #
-# State: `upstream-sha` in the repo root = last published upstream SHA.
+# Versioning: pure semver, mirroring upstream ggml-org/llama.cpp release tags.
+# The build SHA is the master HEAD at publish time; its DISPLAY version is
+# resolved via the compare-API (latest upstream v* tag that is an ancestor of
+# the build SHA). No hashes or build numbers in tags; `latest` always points
+# at the newest publish. Legacy raw-SHA tags from the pre-semver era are
+# pruned after each publish.
+#
+# State: `upstream-sha` + `release-version` in the repo root = last published
+# upstream SHA and its resolved semver.
 
 name: auto-rebuild-on-upstream
 
@@ -35,12 +44,17 @@ concurrency:
   group: auto-rebuild-llama-cuda
   cancel-in-progress: false
 
+env:
+  API_UA: hermes-carpet-llama-slim-ci
+  REGISTRY_REPO: hermes-carpet/llama-server-cuda-slim
+
 jobs:
   check-upstream:
     runs-on: ubuntu-24.04
     outputs:
       build_sha: ${{ steps.check.outputs.build_sha }}
       changed: ${{ steps.check.outputs.changed }}
+      release_version: ${{ steps.version.outputs.release_version }}
     steps:
       - uses: actions/checkout@v6
 
@@ -50,7 +64,7 @@ jobs:
           set -euo pipefail
           sha=$(curl -fsSL \
                   -H "Accept: application/vnd.github+json" \
-                  -H "User-Agent: hermes-carpet-llama-slim-ci" \
+                  -H "User-Agent: $API_UA" \
                   https://api.github.com/repos/ggml-org/llama.cpp/commits/master \
                 | python3 -c "import json,sys; print(json.load(sys.stdin)['sha'])")
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
@@ -75,6 +89,94 @@ jobs:
             echo "build_sha=$latest" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Resolve display semver (latest upstream v* tag ancestor of build SHA)
+        id: version
+        run: |
+          set -euo pipefail
+          sha="${{ steps.check.outputs.build_sha }}"
+          # Fast path: already published this SHA -> reuse recorded version.
+          if [ -n "$sha" ] && [ "$sha" = "$(cat upstream-sha 2>/dev/null || echo '')" ]; then
+            v=$(cat release-version 2>/dev/null || echo "")
+            echo "reusing recorded release-version: $v"
+            echo "release_version=${v:-0.4.0}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Gather upstream v* tag -> commit pairs.
+          python3 - "$sha" <<'PYEOF'
+          import json, os, sys, urllib.request
+
+          OUTPUT = os.environ.get("GITHUB_OUTPUT")
+          def emit(k, v):
+              # Append `k=v` to the GITHUB_OUTPUT file (Actions contract).
+              with open(OUTPUT, "a") as f:
+                  f.write(f"{k}={v}\n")
+
+          def get(url):
+              req = urllib.request.Request(
+                  url, headers={"Accept": "application/vnd.github+json",
+                                "User-Agent": os.environ.get("API_UA", "llama-slim-ci")})
+              with urllib.request.urlopen(req, timeout=30) as r:
+                  return json.load(r)
+
+          def ver_key(v):
+              parts = v.lstrip("v").split(".")
+              while len(parts) < 3:
+                  parts.append("0")
+              try:
+                  return tuple(int(p) for p in parts[:3])
+              except ValueError:
+                  return (0, 0, 0)
+
+          def ver_max(cands):
+              # Highest semver tag name among a list of (name, shortsha) tuples.
+              return max(cands, key=lambda c: ver_key(c[0]))[0]
+
+          sha = sys.argv[1]
+          tags = []
+          for page in (1, 2, 3):
+              batch = get(f"https://api.github.com/repos/ggml-org/llama.cpp/tags?per_page=100&page={page}")
+              if not isinstance(batch, list) or not batch:
+                  break
+              tags.extend(batch)
+          candidates = []
+          for t in tags:
+              name = t.get("name", "")
+              if not (name.startswith("v") and name[1:2].isdigit()):
+                  continue
+              c = t.get("commit", {})
+              tc = (c.get("sha") or "") if isinstance(c, dict) else "".join(str(x) for x in c)
+              if tc:
+                  candidates.append((name, tc[:12]))
+          print(f"upstream semver tags: {len(candidates)}")
+          if not candidates:
+              sys.stderr.write("WARN: no upstream release tags found; defaulting to v0.4.0\n")
+              emit("release_version", "0.4.0")
+              sys.exit(0)
+
+          def ancestor(base, sha):
+              # True if base is the same as or an ancestor of sha.
+              # compare `<base>...<sha>` (2-dot): status "ahead" => sha newer
+              # than base (base is an ancestor); "identical" => same commit.
+              d = get(f"https://api.github.com/repos/ggml-org/llama.cpp/compare/{base}...{sha}")
+              return d.get("status") in ("ahead", "identical")
+
+          # Pick the highest upstream semver tag that is an ancestor of /
+          # identical to the build sha. Deterministic (max by semver), not
+          # dependent on the API's tag ordering.
+          versions = []
+          for name, short in candidates:
+              if ancestor(name, sha) or name.removeprefix("v") in sha:
+                  versions.append(name)
+                  print(f"  ancestor: {name} (tag commit {short})")
+          if versions:
+              version = max(versions, key=lambda n: ver_key(n))[1:]
+              print(f"resolved highest ancestor semver: v{version}")
+          else:
+              version = ver_max(candidates)[1:]
+              print(f"note: no release-tag ancestor; falling back to highest known v{version}")
+          emit("release_version", version)
+          PYEOF
+
   build-test-push:
     needs: check-upstream
     if: needs.check-upstream.outputs.changed == 'true'
@@ -82,6 +184,7 @@ jobs:
     timeout-minutes: 150
     env:
       UPSTREAM_SHA: ${{ needs.check-upstream.outputs.build_sha }}
+      RELEASE_VERSION: ${{ needs.check-upstream.outputs.release_version }}
       STAGE_IMG: ghcr.io/hermes-carpet/llama-server-cuda-slim:candidate
     steps:
       - uses: actions/checkout@v6
@@ -128,9 +231,10 @@ jobs:
       - name: Build slim image
         run: |
           set -euo pipefail
+          echo "building display version v${RELEASE_VERSION}"
           docker build \
-            --build-arg APP_VERSION="$UPSTREAM_SHA" \
-            --build-arg APP_REVISION="auto-rebuild @ ${GITHUB_SHA}" \
+            --build-arg APP_VERSION="$RELEASE_VERSION" \
+            --build-arg APP_REVISION="auto-rebuild @ ${GITHUB_SHA} (upstream ${UPSTREAM_SHA})" \
             -f upstream/Dockerfile \
             -t "$STAGE_IMG" \
             upstream/ \
@@ -212,24 +316,64 @@ jobs:
         if: success()
         run: |
           set -euo pipefail
-          docker tag "$STAGE_IMG" ghcr.io/hermes-carpet/llama-server-cuda-slim:latest
-          docker tag "$STAGE_IMG" "ghcr.io/hermes-carpet/llama-server-cuda-slim:${UPSTREAM_SHA}"
-          docker tag "$STAGE_IMG" ghcr.io/hermes-carpet/llama-server-cuda-slim:cuda-12.8
-          docker push ghcr.io/hermes-carpet/llama-server-cuda-slim:latest
-          docker push "ghcr.io/hermes-carpet/llama-server-cuda-slim:${UPSTREAM_SHA}"
-          docker push ghcr.io/hermes-carpet/llama-server-cuda-slim:cuda-12.8
+          # --- tags (pure semver, no hashes; latest = newest publish) ---
+          docker tag "$STAGE_IMG" "ghcr.io/$REGISTRY_REPO:latest"
+          docker tag "$STAGE_IMG" "ghcr.io/$REGISTRY_REPO:$RELEASE_VERSION"
+          docker tag "$STAGE_IMG" "ghcr.io/$REGISTRY_REPO:cuda-13.3"
+          docker push "ghcr.io/$REGISTRY_REPO:latest"
+          docker push "ghcr.io/$REGISTRY_REPO:$RELEASE_VERSION"
+          docker push "ghcr.io/$REGISTRY_REPO:cuda-13.3"
+
+          # --- prune legacy raw-SHA / one-off tags (pre-semver era) ---
+          # Keep: latest, <semver>, cuda-13.3. Everything else (40+ old
+          # upstream-SHA tags + any probe tags) is deleted, best-effort.
+          python3 - <<'PYEOF'
+          import json, re, urllib.request
+          repo = "hermes-carpet/llama-server-cuda-slim"
+          keep = re.compile(r"^(latest|\d+\.\d+\.\d+|cuda-13\.3)$")
+          tok = json.load(urllib.request.urlopen(
+              f"https://ghcr.io/token?service=ghcr.io&scope=repository:{repo}:pull,push", timeout=30))["token"]
+          def req(method, url):
+              r = urllib.request.Request(url, method=method,
+                                          headers={"Authorization": "Bearer " + tok})
+              try:
+                  with urllib.request.urlopen(r, timeout=30) as resp:
+                      return resp.status
+              except urllib.error.HTTPError as e:
+                  return e.code
+          tags = json.load(urllib.request.urlopen(
+              urllib.request.Request(
+                  f"https://ghcr.io/v2/{repo}/tags/list",
+                  headers={"Authorization": "Bearer " + tok}), timeout=30))["tags"]
+          print(f"tag list: {len(tags)} tags")
+          removed = 0
+          for t in tags:
+              if keep.match(t):
+                  continue
+              code = req("DELETE", f"https://ghcr.io/v2/{repo}/manifests/{t}")
+              if code in (200, 202):
+                  removed += 1
+                  print(f"pruned tag {t}")
+              elif code in (404, 401):
+                  print(f"tag {t}: {code} (skip)")
+              else:
+                  print(f"tag {t}: DELETE -> {code} (non-fatal)")
+          print(f"pruned {removed} legacy tags; remaining set = latest + semver + cuda-13.3")
+          PYEOF
+
           # Clean the local docker state so the next run starts fresh.
           docker system prune -f || true
-          echo "published as latest / ${UPSTREAM_SHA} / cuda-12.8"
+          echo "published as latest / v${RELEASE_VERSION} / cuda-13.3"
 
-      - name: Advance upstream-sha + commit
+      - name: Advance upstream-sha + release-version + commit
         if: success()
         run: |
           set -euo pipefail
           echo "$UPSTREAM_SHA" > upstream-sha
+          echo "$RELEASE_VERSION" > release-version
           git config user.name  "hermes-carpet"
           git config user.email "hermes-carpet@users.noreply.github.com"
-          git add upstream-sha
-          git commit -m "auto-rebuild: publish image for upstream $UPSTREAM_SHA"
+          git add upstream-sha release-version
+          git commit -m "auto-rebuild: publish v${RELEASE_VERSION} for upstream $UPSTREAM_SHA"
           git push
-          echo "pushed new upstream-sha"
+          echo "pushed new upstream-sha + release-version"

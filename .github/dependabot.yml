@@ -1,0 +1,24 @@
+# Dependabot: NVIDIA base-image tag updates for llama-server-cuda-slim.
+#
+# The only external dependency that matters for CUDA ABI here is the
+# nvidia/cuda base image tag in Dockerfile (build stage). This is a
+# DockerHub version, NOT a Debian package — the runtime stage is plain
+# ubuntu:24.04 with the CUDA runtime libs baked in from the build stage,
+# so it does NOT need to line up with Debian/apt at all.
+#
+# When Dependabot bumps 13.3.0 -> 13.4.0:
+#   * the [ -f "$D/$lib" ] FATAL guards in Dockerfile catch the renamed
+#     versioned blob filenames (cuda-13.3/ -> cuda-13.4/, .so.13.3.x ->
+#     .so.13.4.x) on CI, and the PR shows the build log.
+#   * merging is a 2-minute edit: CUDA_VERSION + CUDA_LIBS + the
+#     /usr/local/cuda-13.x path, then the self-contained runtime stays
+#     the same shape.
+version: 2
+updates:
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # Target the nvidia/cuda base tag; pull_requests option keeps the
+    # bump + build-in-test PR review on one PR.
+    open-pull-requests-limit: 3
