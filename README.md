@@ -152,8 +152,8 @@ On a new upstream SHA it:
    acceptance is the local GPU-box gate against the pulled image.
 4. **Only if the test passes**, tags and pushes to ghcr.io:
    - `ghcr.io/hermes-carpet/llama-server-cuda-slim:latest`
-   - `ghcr.io/hermes-carpet/llama-server-cuda-slim:<upstream-sha>`
-   - `ghcr.io/hermes-carpet/llama-server-cuda-slim:cuda-13.3`
+   - `ghcr.io/hermes-carpet/llama-server-cuda-slim:<upstream-release>`
+     (pure semver mirrored from upstream, e.g. `0.4.0` — no hashes)
 5. Commits + pushes the new SHA to `upstream-sha` so the next poll knows
    this upstream commit is already published.
 

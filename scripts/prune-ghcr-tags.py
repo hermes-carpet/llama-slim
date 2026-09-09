@@ -18,9 +18,9 @@ write:packages).
 
 Behavior:
   Keeps versions carrying at least one tag matching:
-      latest | <semver> (e.g. 0.4.0) | cuda-13.3
-  Deletes every other version (40+ legacy upstream-SHA tags from the
-  pre-semver era, plus one-off probe tags).
+      latest | <semver> (e.g. 0.4.0)
+  Deletes every other version (legacy upstream-SHA tags from the
+  pre-semver era, stale cuda-* tags, and one-off probe tags).
 
 Always exits 0 (best-effort): it runs after a successful push and must
 never fail the CI run.
@@ -41,7 +41,7 @@ import urllib.error
 import urllib.request
 
 API = "https://api.github.com"
-KEEP = re.compile(r"^(latest|\d+\.\d+\.\d+|cuda-13\.3)$")
+KEEP = re.compile(r"^(latest|\d+\.\d+\.\d+)$")
 PKG = os.environ.get("GH_PACKAGE_NAME", "llama-server-cuda-slim")
 MAX_DELETES = int(os.environ.get("PRUNE_MAX_DELETES", "200"))
 DRY_RUN = os.environ.get("PRUNE_DRY_RUN") == "1"

@@ -5,8 +5,7 @@
 # Published (only on pass):
 #   ghcr.io/hermes-carpet/llama-server-cuda-slim:latest
 #   ghcr.io/hermes-carpet/llama-server-cuda-slim:<semver>     # mirrors upstream release
-#                                                              # (v0.4.0, v0.4.1, ...)
-#   ghcr.io/hermes-carpet/llama-server-cuda-slim:cuda-13.3    # CUDA-major convenience tag
+#                                                             # (0.4.0, 0.4.1, ...)
 #
 # Versioning: pure semver, mirroring upstream ggml-org/llama.cpp release tags.
 # The build SHA is the master HEAD at publish time; its DISPLAY version is
@@ -315,40 +314,28 @@ jobs:
       - name: Push to ghcr.io on PASS
         if: success()
         env:
-          # Explicit token for the prune script: the bare GITHUB_TOKEN env
-          # var was observed MISSING inside this step (sweep no-op'd), but
-          # secrets.GITHUB_TOKEN / github.token are always available — the
-          # docker/login-action above uses it to auth the push that works.
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           # --- tags (pure semver, no hashes; latest = newest publish) ---
           docker tag "$STAGE_IMG" "ghcr.io/$REGISTRY_REPO:latest"
           docker tag "$STAGE_IMG" "ghcr.io/$REGISTRY_REPO:$RELEASE_VERSION"
-          docker tag "$STAGE_IMG" "ghcr.io/$REGISTRY_REPO:cuda-13.3"
           docker push "ghcr.io/$REGISTRY_REPO:latest"
           docker push "ghcr.io/$REGISTRY_REPO:$RELEASE_VERSION"
-          docker push "ghcr.io/$REGISTRY_REPO:cuda-13.3"
 
           # --- prune legacy raw-SHA / one-off tags (pre-semver era) ---
-          # Keep: latest, <semver>, cuda-13.3. Everything else (40+ old
-          # upstream-SHA tags + any probe tags) is deleted, best-effort.
-          #
-          # NOTE: GHCR does NOT implement distribution-spec DELETE, and
-          # GitHub GraphQL has no PackageVersion.tags field — the working
-          # path is the GitHub REST Packages API (GET/DELETE
-          # /user/packages/container/<image>/versions), which the script
-          # uses with the workflow token (`packages: write`, see the
-          # permissions: block above). Reference: community discussion
-          # 26267 + airtower-luna/ghcr-prune.py. Kept non-fatal: the push
-          # above already succeeded, so a prune hiccup must never fail
-          # the run.
+          # Keep: latest + <semver>. Everything else (old upstream-SHA tags,
+          # stale cuda-* tags, any probe tags) is deleted, best-effort.
+          # NOTE: GHCR has no working distribution-DELETE; the script uses
+          # the GitHub REST Packages API (see permissions: block above).
+          # Kept non-fatal — the push already succeeded, so a prune hiccup
+          # must never fail the run.
           python3 scripts/prune-ghcr-tags.py \
             || echo "WARN: tag prune did not complete (non-fatal)"
 
           # Clean the local docker state so the next run starts fresh.
           docker system prune -f || true
-          echo "published as latest / v${RELEASE_VERSION} / cuda-13.3"
+          echo "published as latest / v${RELEASE_VERSION}"
 
       - name: Advance upstream-sha + release-version + commit
         if: success()
