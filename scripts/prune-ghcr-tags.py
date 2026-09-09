@@ -1,131 +1,142 @@
 #!/usr/bin/env python3
-"""Prune legacy (raw-SHA / one-off) container tags from a GHCR package.
+"""Prune legacy (raw-SHA / one-off) container versions/tags from a GHCR package.
 
-Why this exists:
-  GHCR does NOT implement distribution-spec DELETE —
-  ``DELETE /v2/<repo>/manifests/<tag>`` returns 405 "operation is
-  unsupported" (even with a token granted `delete`, by tag or by digest).
-  The supported way to delete a published image version is the GitHub
-  GraphQL ``deletePackageVersion`` mutation, which requires a token with
-  packages scope (CI GITHUB_TOKEN, or a user token with write:packages).
+Approach (per GitHub community discussion 26267 + airtower-luna/ghcr-prune.py):
+GHCR does NOT implement distribution-spec DELETE
+(``DELETE https://ghcr.io/v2/<repo>/manifests/<tag>`` -> 405 "operation is
+unsupported" in every auth mode), and the GitHub GraphQL ``PackageVersion``
+type carries no tag-list field. Tag deletion is done through the
+GitHub REST Packages API:
+
+    GET    https://api.github.com/user/packages/container/<image>/versions
+           -> each version has metadata.container.tags[]
+    DELETE https://api.github.com/user/packages/container/<image>/versions/<id>
+
+Requires a token with packages scope (CI GITHUB_TOKEN works via the
+workflow ``permissions:`` block; a local token needs read:packages /
+write:packages).
 
 Behavior:
-  Keeps versions that carry at least one tag matching:
+  Keeps versions carrying at least one tag matching:
       latest | <semver> (e.g. 0.4.0) | cuda-13.3
   Deletes every other version (40+ legacy upstream-SHA tags from the
-  pre-semver era, plus one-off probe tags). Always exits 0 (best-effort);
-  it must never fail the CI run.
+  pre-semver era, plus one-off probe tags).
+
+Always exits 0 (best-effort): it runs after a successful push and must
+never fail the CI run.
 
 Env:
-  GITHUB_TOKEN   GitHub token with packages scope (required in CI)
+  GITHUB_TOKEN | GH_API_TOKEN   GitHub token with packages scope
   GH_PACKAGE_NAME  (default llama-server-cuda-slim)
-  GH_ACCOUNT        (default hermes-carpet; user or org login)
+  GH_ACCOUNT       (default hermes-carpet; unused for this endpoint --
+                   /user/ is resolved via the token -- but kept for logs)
+  PRUNE_DRY_RUN=1      list only, no deletes
+  PRUNE_MAX_DELETES=N  safety cap (default 200)
 """
 import json
 import os
 import re
 import sys
-import urllib.request
 import urllib.error
+import urllib.request
 
-GQL = "https://api.github.com/graphql"
+API = "https://api.github.com"
 KEEP = re.compile(r"^(latest|\d+\.\d+\.\d+|cuda-13\.3)$")
-ACCT = os.environ.get("GH_ACCOUNT", "hermes-carpet")
 PKG = os.environ.get("GH_PACKAGE_NAME", "llama-server-cuda-slim")
+MAX_DELETES = int(os.environ.get("PRUNE_MAX_DELETES", "200"))
+DRY_RUN = os.environ.get("PRUNE_DRY_RUN") == "1"
 
 
 def get_token():
-    return os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_API_TOKEN") or ""
+    # GITHUB_TOKEN first: in this workflow the base env also injects
+    # GH_API_TOKEN (a fine-grained token WITHOUT packages scope), which
+    # would shadow the repo token that HAS packages:write.
+    return (
+        os.environ.get("GITHUB_TOKEN")
+        or os.environ.get("GH_API_TOKEN")
+        or ""
+    )
 
 
-def gql(token, query, variables=None):
-    body = {"query": query}
-    if variables:
-        body["variables"] = variables
+def api(token, method, path):
     req = urllib.request.Request(
-        GQL,
-        data=json.dumps(body).encode(),
+        f"{API}{path}",
+        method=method,
         headers={
             "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
             "Accept": "application/vnd.github+json",
             "User-Agent": "hermes-carpet-ghcr-sweep",
         },
     )
     with urllib.request.urlopen(req, timeout=60) as r:
-        return json.load(r)
-
-
-def find_package(token):
-    """Return the package node (with versions) under user or org account."""
-    for kind in ("user", "organization"):
-        q = (
-            "query P {"
-            f'{kind}(login: "{ACCT}") {{'
-            "  packages(first: 40) {"
-            "    nodes {"
-            "      id name packageType"
-            "      versions(first: 200) { nodes { id version "
-            "        tags(first: 40) { nodes { node { name } } } } }"
-            "    }"
-            "  }"
-            "}"
-            "}"
-        )
-        try:
-            data = gql(token, q)
-        except urllib.error.HTTPError as e:
-            print(f"  {kind} lookup -> HTTP {e.code}; trying next")
-            continue
-        except Exception as e:  # noqa: BLE001
-            print(f"  {kind} lookup -> {e}; trying next")
-            continue
-        if data.get("errors"):
-            continue
-        owner = data["data"].get(kind) or {}
-        for p in owner.get("packages", {}).get("nodes", []):
-            if p["name"] == PKG:
-                return p
-    return None
+        body = r.read().decode()
+        return (r.status, json.loads(body) if body else None)
 
 
 def main():
     token = get_token()
     if not token:
-        print("WARN: no GITHUB_TOKEN; cannot prune GHCR tags (non-fatal)")
-        return
-    pkg = find_package(token)
-    if not pkg:
-        print("WARN: package not found via GraphQL (scope?). Non-fatal.")
+        print("WARN: no GITHUB_TOKEN; skipping GHCR tag prune (non-fatal)")
         return
 
-    versions = pkg["versions"]["nodes"]
-    kept = [v for v in versions
-            if any(KEEP.match(t["node"]["name"]) for t in v["tags"]["nodes"])]
-    drop = [v for v in versions if v not in kept]
-    print(f"package {PKG}: {len(versions)} versions — keep {len(kept)}, delete {len(drop)}")
+    # Paginate the container versions (max 100 per page).
+    versions = []
+    page = 1
+    while True:
+        status, data = api(
+            token, "GET",
+            f"/user/packages/container/{PKG}/versions?per_page=100&page={page}",
+        )
+        if status != 200 or not data:
+            print(f"WARN: versions list HTTP {status}; aborting prune (non-fatal)")
+            return
+        versions.extend(data)
+        if len(data) < 100:
+            break
+        page += 1
+
+    kept, drop = [], []
+    for v in versions:
+        tags = (v.get("metadata", {}).get("container", {}) or {}).get("tags") or []
+        (kept if any(KEEP.match(t) for t in tags) else drop).append((v, tags))
+
+    print(
+        f"package {PKG}: {len(versions)} versions -- keep {len(kept)} "
+        f"({', '.join(t for _, t in kept and [(v, t) for (v, t) in kept]) if kept else 'none'}), "
+        f"delete {len(drop)}"
+    )
+    if DRY_RUN:
+        for v, tags in drop:
+            print(f"  dry-run would delete: {tags or v['name']} (id={v['id']})")
+        print("dry-run: no deletes performed")
+        return
 
     deleted = errors = 0
-    for v in drop:
-        tags = [t["node"]["name"][:24] for t in v["tags"]["nodes"]] or [v["version"][:24]]
+    for v, tags in drop:
+        if deleted >= MAX_DELETES:
+            print(f"  reached max deletions cap ({MAX_DELETES}); stopping")
+            break
+        label = ", ".join(tags) if tags else v["name"]
         try:
-            r = gql(
-                token,
-                "mutation Del($pid: ID!, $vid: ID!) {"
-                "  deletePackageVersion(input: {packageId: $pid, versionId: $vid}) {"
-                "    data version { id } } }",
-                {"pid": pkg["id"], "vid": v["id"]},
+            status, _ = api(
+                token, "DELETE",
+                f"/user/packages/container/{PKG}/versions/{v['id']}",
             )
+        except urllib.error.HTTPError as e:
+            print(f"  ERR {label}: HTTP {e.code}")
+            errors += 1
+            continue
         except Exception as e:  # noqa: BLE001
-            print(f"  ERR {tags[0]}: {e}")
+            print(f"  ERR {label}: {e}")
             errors += 1
             continue
-        if r.get("errors"):
-            print(f"  ERR {tags[0]}: {json.dumps(r['errors'])[:200]}")
+        if status == 204:
+            deleted += 1
+            print(f"  deleted {label} (id={v['id']})")
+        else:
+            print(f"  ERR {label}: DELETE -> {status}")
             errors += 1
-            continue
-        deleted += 1
-        print(f"  deleted {tags[0]}…")
+
     print(f"prune done: {deleted} deleted, {errors} errors (non-fatal either way)")
 
 
