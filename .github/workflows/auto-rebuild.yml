@@ -314,6 +314,12 @@ jobs:
 
       - name: Push to ghcr.io on PASS
         if: success()
+        env:
+          # Explicit token for the prune script: the bare GITHUB_TOKEN env
+          # var was observed MISSING inside this step (sweep no-op'd), but
+          # secrets.GITHUB_TOKEN / github.token are always available — the
+          # docker/login-action above uses it to auth the push that works.
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           # --- tags (pure semver, no hashes; latest = newest publish) ---
@@ -357,6 +363,9 @@ jobs:
             echo "state already current (no new commit); nothing to advance"
           else
             git commit -m "auto-rebuild: publish v${RELEASE_VERSION} for upstream $UPSTREAM_SHA"
+            # Rebase over any commits that landed during the ~25-min build
+            # (e.g. Dependabot / manual pushes) before pushing.
+            git pull --rebase origin main
             git push
             echo "pushed new upstream-sha + release-version"
           fi

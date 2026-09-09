@@ -48,11 +48,12 @@ DRY_RUN = os.environ.get("PRUNE_DRY_RUN") == "1"
 
 
 def get_token():
-    # GITHUB_TOKEN first: in this workflow the base env also injects
-    # GH_API_TOKEN (a fine-grained token WITHOUT packages scope), which
-    # would shadow the repo token that HAS packages:write.
+    # Explicit step env first (see the workflow's explicit GH_TOKEN): the
+    # bare GITHUB_TOKEN env var was observed MISSING inside the step
+    # despite docker/login-action working, so don't rely on it alone.
     return (
-        os.environ.get("GITHUB_TOKEN")
+        os.environ.get("GH_TOKEN")
+        or os.environ.get("GITHUB_TOKEN")
         or os.environ.get("GH_API_TOKEN")
         or ""
     )
