@@ -138,10 +138,13 @@ safe (same SONAME) and pass. `--n-gpu-layers 0` runs skip the guard entirely
 
 `.github/workflows/auto-rebuild.yml` runs:
 
-- **Every 30 minutes** (cron) — polls `ggml-org/llama.cpp` master for a
-  new commit SHA; if it matches the SHA we last published, no work happens.
-- **On `workflow_dispatch`** — manually: pass `upstream_sha` (optional) and
-  `force` to rebuild even a published SHA.
+- **Every Tuesday at 09:00 UTC** (cron) — polls `ggml-org/llama.cpp`
+  master for a new commit SHA; if it matches the SHA we last published
+  (or `force: false` was requested), the run exits in <1 min with no
+  build. Weekly cadence keeps the tag list clean — `:latest` follows
+  upstream releases, not daily upstream diffs.
+- **On `workflow_dispatch`** — manually trigger: pass `upstream_sha`
+  (optional) and `force` to rebuild even a published SHA.
 
 On a new upstream SHA it:
 

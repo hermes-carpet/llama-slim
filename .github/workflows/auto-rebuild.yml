@@ -21,7 +21,11 @@ name: auto-rebuild-on-upstream
 
 on:
   schedule:
-    - cron: '*/30 * * * *'
+    # Weekly, Tuesday 09:00 UTC: poll ggml-org/llama.cpp master for
+    # commits newer than the last published SHA; if none, exits in <1 min
+    # with no build. Weekly cadence keeps the tag list clean and avoids
+    # pointless runs — `:latest` follows upstream releases, not daily diffs.
+    - cron: '0 9 * * 2'
   workflow_dispatch:
     inputs:
       upstream_sha:
