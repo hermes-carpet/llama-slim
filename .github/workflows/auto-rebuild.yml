@@ -328,14 +328,15 @@ jobs:
           # Keep: latest, <semver>, cuda-13.3. Everything else (40+ old
           # upstream-SHA tags + any probe tags) is deleted, best-effort.
           #
-          # NOTE: GHCR does NOT implement distribution-spec DELETE —
-          # DELETE /v2/<repo>/manifests/<tag> returns 405 "operation is
-          # unsupported" regardless of token auth/scope. Deletion only
-          # works via the GitHub GraphQL deletePackageVersion mutation,
-          # which needs packages scope (the GITHUB_TOKEN has
-          # `packages: write` for this repo — see the permissions:
-          # block above). Kept non-fatal: the push above already
-          # succeeded, so a prune hiccup must never fail the run.
+          # NOTE: GHCR does NOT implement distribution-spec DELETE, and
+          # GitHub GraphQL has no PackageVersion.tags field — the working
+          # path is the GitHub REST Packages API (GET/DELETE
+          # /user/packages/container/<image>/versions), which the script
+          # uses with the workflow token (`packages: write`, see the
+          # permissions: block above). Reference: community discussion
+          # 26267 + airtower-luna/ghcr-prune.py. Kept non-fatal: the push
+          # above already succeeded, so a prune hiccup must never fail
+          # the run.
           python3 scripts/prune-ghcr-tags.py \
             || echo "WARN: tag prune did not complete (non-fatal)"
 
