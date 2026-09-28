@@ -105,10 +105,13 @@ def main():
         # alias should not linger).
         (kept if tags and all(KEEP.match(t) for t in tags) else drop).append((v, tags))
 
+    # Build the summary without the buggy join.
+    keep_tags = sorted({t for _, t in kept for t in t})
+    drop_tags = sorted({t for _, t in drop for t in t})
     print(
         f"package {PKG}: {len(versions)} versions -- keep {len(kept)} "
-        f"({', '.join(t for _, t in kept and [(v, t) for (v, t) in kept]) if kept else 'none'}), "
-        f"delete {len(drop)}"
+        f"({', '.join(keep_tags) or 'none'}), delete {len(drop)} "
+        f"({', '.join(drop_tags) or 'none'})"
     )
     if DRY_RUN:
         for v, tags in drop:
