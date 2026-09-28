@@ -8,32 +8,28 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       packages: write
+      actions: read
     steps:
-      - name: Remove cuda-13.3 tag from GHCR
+      - name: Drop stray cuda-13.3 tag via REST Packages API
         env:
-          GH_TOKEN: ***
+          GH_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -uo pipefail
-          curl -sf https://raw.githubusercontent.com/hermes-carpet/llama-slim/main/scripts/prune-ghcr-tags.py \
-               -o /tmp/prune.py
-          cat /tmp/prune.py | head -30
-          echo "---"
-          # Use the proven path: REST Packages API
-          GH=$GH_TOKEN
-          RESP=$(curl -s -H "Authorization: Bearer ***" -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/user/packages?package_type=CONTAINER&per_page=100")
-          PID=$(echo "$RESP" | jq -r '.[] | select(.name=="llama-server-cuda-slim").id')
+          AUTH=*** -H "Authorization: Bearer $GH_API_TOKEN" -H "Accept: application/vnd.github+json"
+          # Look up container package
+          PKG_JSON=$( $AUTH "https://api.github.com/user/packages?package_type=CONTAINER&per_page=100" )
+          PID=$(echo "$PKG_JSON" | jq -r '.[] | select(.name=="llama-server-cuda-slim") | .id')
           echo "package id: $PID"
-          RESP2=$(curl -s -H "Authorization: Bearer ***" -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/user/packages/container/llama-server-cuda-slim/versions?per_page=100")
-          echo "$RESP2" > /tmp/versions.json
-          jq -c '.[] | {id, versions: [.versions[].name]}' /tmp/versions.json | grep cuda-13.3 || echo "no cuda-13.3 version found"
-          VID=$(echo "$RESP2" | jq -r '.[] | select(.versions[0].name=="cuda-13.3").id')
-          echo "delete version id: $VID"
+          # Find version with cuda-13.3 tag
+          VJSON=$( $AUTH "https://api.github.com/user/packages/container/llama-server-cuda-slim/versions?per_page=100" )
+          echo "$VJSON" | jq -c '.[] | {id, tags:[.versions[].name]}'
+          VID=$(echo "$VJSON" | jq -r '.[] | select(.versions[].name=="cuda-13.3") | .id' | sort -u)
           if [ -n "$VID" ]; then
-            RESP3=$(curl -s -w '\n%{http_code}' -o /tmp/del.json -X DELETE \
-              -H "Authorization: Bearer ***" -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/user/packages/container/llama-server-cuda-slim/versions/$VID")
-            echo "delete result: $(tail -1 <<<"$RESP3")"
-            cat /tmp/del.json
+            for v in $VID; do
+              RESP=$( $AUTH -o /tmp/del.json -w '%{http_code}' -X DELETE \
+                     "https://api.github.com/user/packages/container/llama-server-cuda-slim/versions/$v" )
+              echo "delete v=$v -> $RESP"; cat /tmp/del.json 2>/dev/null
+            done
+          else
+            echo "cuda-13.3 tag: not found (already cleaned?)"
           fi
