@@ -10,26 +10,27 @@ jobs:
       packages: write
       actions: read
     steps:
-      - name: Drop stray cuda-13.3 tag via REST Packages API
-        # GITHUB_TOKEN is auto-injected by GitHub Actions with read+write for the repo.
+      - name: Drop stray cuda-13.3 tag via gh api
+        env:
+          GH_TOKEN: ***
         run: |
           set -uo pipefail
-          hdr=()
-          hdr+=(-H)
-          hdr+=("Authorization: Bearer ***")
-          hdr+=(-H)
-          hdr+=("Accept: application/vnd.github+json")
-          AUTH="curl -s ${hdr[*]} https://api.github.com"
-          PKG_JSON=$(bash -c "$AUTH/user/packages?package_type=CONTAINER&per_page=100")
-          echo "packages: $(echo "$PKG_JSON" | jq -r '.[].name' | tr '\n' ' ')"
-          VJSON=$(bash -c "$AUTH/user/packages/container/llama-server-cuda-slim/versions?per_page=100")
-          echo "$VJSON" | jq -c '.[] | {id, tags:[.versions[].name]}'
-          VID=$(echo "$VJSON" | jq -r '.[] | select(.versions[].name=="cuda-13.3") | .id' | sort -u)
+          # gh api uses GH_TOKEN env var and automatically sets Accept + auth headers
+          echo "--- listing container package versions ---"
+          gh api --paginate "/user/packages/container/llama-server-cuda-slim/versions?per_page=100" \
+            --jq '.[] | {id, tags:[.versions[].name]}'
+          VID=$(gh api --paginate "/user/packages/container/llama-server-cuda-slim/versions?per_page=100" \
+                --jq '.[] | select(.versions[].name=="cuda-13.3") | .id' | sort -u)
+          echo "---"
+          echo "will delete version id(s): [$VID]"
           if [ -n "$VID" ]; then
             for v in $VID; do
-              RESP=$(bash -c "$AUTH -o /tmp/del.json -w %{http_code} -X DELETE /user/packages/container/llama-server-cuda-slim/versions/$v")
-              echo "delete v=$v -> $RESP"; cat /tmp/del.json 2>/dev/null; echo
+              gh api -X DELETE "/user/packages/container/llama-server-cuda-slim/versions/$v" \
+                && echo "deleted v=$v"
             done
+            echo "--- verify after delete ---"
+            gh api --paginate "/user/packages/container/llama-server-cuda-slim/versions?per_page=100" \
+              --jq '.[] | .versions[].name'
           else
             echo "cuda-13.3 tag: not found (already cleaned?)"
           fi
