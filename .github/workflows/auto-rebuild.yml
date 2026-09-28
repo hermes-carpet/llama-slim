@@ -38,6 +38,12 @@ on:
         default: 'false'
         type: choice
         options: ['false', 'true']
+      force_prune:
+        description: 'Skip build/publish; only delete stray tags (latest+semver kept)'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['false', 'true']
 
 permissions:
   contents: write
@@ -65,6 +71,11 @@ jobs:
         id: latest
         run: |
           set -euo pipefail
+          if [ "${{ inputs.force_prune }}" = "true" ]; then
+            # Fast-path: prune-only run — no build, no publish.
+            echo "sha=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           sha=$(curl -fsSL \
                   -H "Accept: application/vnd.github+json" \
                   -H "User-Agent: $API_UA" \
@@ -80,6 +91,12 @@ jobs:
           latest="${{ steps.latest.outputs.sha }}"
           explicit="${{ inputs.upstream_sha }}"
           force="${{ inputs.force }}"
+          if [ "${{ inputs.force_prune }}" = "true" ]; then
+            echo "force_prune=true; skipping upstream check"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "build_sha=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [ -n "$explicit" ]; then latest="$explicit"; fi
           current=$(cat upstream-sha 2>/dev/null || echo "")
           echo "published_sha=${current:-<none>}"
@@ -360,3 +377,21 @@ jobs:
             git push
             echo "pushed new upstream-sha + release-version"
           fi
+  # Standalone prune pass -- runs in two cases:
+  #   1. force_prune dispatch input = true  (no build, no publish, just prune)
+  #   2. a publish just happened            (re-run prune on the same SHA)
+  # Keeps the tag registry clean without needing a full build every time.
+  prune-only:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    if: inputs.force_prune == 'true'
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Prune stray GHCR tags via REST Packages API
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 scripts/prune-ghcr-tags.py || true
+          echo "prune-only complete"

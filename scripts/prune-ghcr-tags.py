@@ -17,10 +17,11 @@ workflow ``permissions:`` block; a local token needs read:packages /
 write:packages).
 
 Behavior:
-  Keeps versions carrying at least one tag matching:
+  Keeps versions whose tags ALL match one of:
       latest | <semver> (e.g. 0.4.0)
-  Deletes every other version (legacy upstream-SHA tags from the
-  pre-semver era, stale cuda-* tags, and one-off probe tags).
+  Deletes every other version — including stray tag aliases (e.g. cuda-*
+  tags that share a digest with a semver tag) and legacy upstream-SHA
+  tags from the pre-semver era.
 
 Always exits 0 (best-effort): it runs after a successful push and must
 never fail the CI run.
@@ -99,7 +100,10 @@ def main():
     kept, drop = [], []
     for v in versions:
         tags = (v.get("metadata", {}).get("container", {}) or {}).get("tags") or []
-        (kept if any(KEEP.match(t) for t in tags) else drop).append((v, tags))
+        # Keep ONLY if every tag is latest or semver. A version with one
+        # cuda-13.3 + one 0.4.0 tag still counts as stray (the cuda-13.3
+        # alias should not linger).
+        (kept if tags and all(KEEP.match(t) for t in tags) else drop).append((v, tags))
 
     print(
         f"package {PKG}: {len(versions)} versions -- keep {len(kept)} "
