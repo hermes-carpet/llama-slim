@@ -1,0 +1,39 @@
+name: cleanup-removing-tag
+
+on:
+  workflow_dispatch:
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - name: Remove cuda-13.3 tag from GHCR
+        env:
+          GH_TOKEN: ***
+        run: |
+          set -uo pipefail
+          curl -sf https://raw.githubusercontent.com/hermes-carpet/llama-slim/main/scripts/prune-ghcr-tags.py \
+               -o /tmp/prune.py
+          cat /tmp/prune.py | head -30
+          echo "---"
+          # Use the proven path: REST Packages API
+          GH=$GH_TOKEN
+          RESP=$(curl -s -H "Authorization: Bearer ***" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/user/packages?package_type=CONTAINER&per_page=100")
+          PID=$(echo "$RESP" | jq -r '.[] | select(.name=="llama-server-cuda-slim").id')
+          echo "package id: $PID"
+          RESP2=$(curl -s -H "Authorization: Bearer ***" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/user/packages/container/llama-server-cuda-slim/versions?per_page=100")
+          echo "$RESP2" > /tmp/versions.json
+          jq -c '.[] | {id, versions: [.versions[].name]}' /tmp/versions.json | grep cuda-13.3 || echo "no cuda-13.3 version found"
+          VID=$(echo "$RESP2" | jq -r '.[] | select(.versions[0].name=="cuda-13.3").id')
+          echo "delete version id: $VID"
+          if [ -n "$VID" ]; then
+            RESP3=$(curl -s -w '\n%{http_code}' -o /tmp/del.json -X DELETE \
+              -H "Authorization: Bearer ***" -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/user/packages/container/llama-server-cuda-slim/versions/$VID")
+            echo "delete result: $(tail -1 <<<"$RESP3")"
+            cat /tmp/del.json
+          fi
