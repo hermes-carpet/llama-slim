@@ -10,27 +10,7 @@ jobs:
       packages: write
       actions: read
     steps:
-      - name: Drop stray cuda-13.3 tag via gh api
-        env:
-          GH_TOKEN: ***
-        run: |
-          set -uo pipefail
-          # gh api uses GH_TOKEN env var and automatically sets Accept + auth headers
-          echo "--- listing container package versions ---"
-          gh api --paginate "/user/packages/container/llama-server-cuda-slim/versions?per_page=100" \
-            --jq '.[] | {id, tags:[.versions[].name]}'
-          VID=$(gh api --paginate "/user/packages/container/llama-server-cuda-slim/versions?per_page=100" \
-                --jq '.[] | select(.versions[].name=="cuda-13.3") | .id' | sort -u)
-          echo "---"
-          echo "will delete version id(s): [$VID]"
-          if [ -n "$VID" ]; then
-            for v in $VID; do
-              gh api -X DELETE "/user/packages/container/llama-server-cuda-slim/versions/$v" \
-                && echo "deleted v=$v"
-            done
-            echo "--- verify after delete ---"
-            gh api --paginate "/user/packages/container/llama-server-cuda-slim/versions?per_page=100" \
-              --jq '.[] | .versions[].name'
-          else
-            echo "cuda-13.3 tag: not found (already cleaned?)"
-          fi
+      - uses: actions/checkout@v5
+
+      - name: Drop stray cuda-13.3 tag via REST Packages API
+        run: python3 scripts/cleanup-tags.py
