@@ -11,24 +11,24 @@ jobs:
       actions: read
     steps:
       - name: Drop stray cuda-13.3 tag via REST Packages API
-        env:
-          GH_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # GITHUB_TOKEN is auto-injected by GitHub Actions with read+write for the repo.
         run: |
           set -uo pipefail
-          AUTH=*** -H "Authorization: Bearer $GH_API_TOKEN" -H "Accept: application/vnd.github+json"
-          # Look up container package
-          PKG_JSON=$( $AUTH "https://api.github.com/user/packages?package_type=CONTAINER&per_page=100" )
-          PID=$(echo "$PKG_JSON" | jq -r '.[] | select(.name=="llama-server-cuda-slim") | .id')
-          echo "package id: $PID"
-          # Find version with cuda-13.3 tag
-          VJSON=$( $AUTH "https://api.github.com/user/packages/container/llama-server-cuda-slim/versions?per_page=100" )
+          hdr=()
+          hdr+=(-H)
+          hdr+=("Authorization: Bearer ***")
+          hdr+=(-H)
+          hdr+=("Accept: application/vnd.github+json")
+          AUTH="curl -s ${hdr[*]} https://api.github.com"
+          PKG_JSON=$(bash -c "$AUTH/user/packages?package_type=CONTAINER&per_page=100")
+          echo "packages: $(echo "$PKG_JSON" | jq -r '.[].name' | tr '\n' ' ')"
+          VJSON=$(bash -c "$AUTH/user/packages/container/llama-server-cuda-slim/versions?per_page=100")
           echo "$VJSON" | jq -c '.[] | {id, tags:[.versions[].name]}'
           VID=$(echo "$VJSON" | jq -r '.[] | select(.versions[].name=="cuda-13.3") | .id' | sort -u)
           if [ -n "$VID" ]; then
             for v in $VID; do
-              RESP=$( $AUTH -o /tmp/del.json -w '%{http_code}' -X DELETE \
-                     "https://api.github.com/user/packages/container/llama-server-cuda-slim/versions/$v" )
-              echo "delete v=$v -> $RESP"; cat /tmp/del.json 2>/dev/null
+              RESP=$(bash -c "$AUTH -o /tmp/del.json -w %{http_code} -X DELETE /user/packages/container/llama-server-cuda-slim/versions/$v")
+              echo "delete v=$v -> $RESP"; cat /tmp/del.json 2>/dev/null; echo
             done
           else
             echo "cuda-13.3 tag: not found (already cleaned?)"
