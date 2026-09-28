@@ -113,6 +113,11 @@ jobs:
         id: version
         run: |
           set -euo pipefail
+          if [ "${{ inputs.force_prune }}" = "true" ]; then
+            echo "force_prune=true; skipping semver resolve (no build/publish)"
+            echo "release_version=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           sha="${{ steps.check.outputs.build_sha }}"
           # Fast path: already published this SHA -> reuse recorded version.
           if [ -n "$sha" ] && [ "$sha" = "$(cat upstream-sha 2>/dev/null || echo '')" ]; then
