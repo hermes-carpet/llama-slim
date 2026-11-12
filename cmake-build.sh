@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
 # cmake-build.sh — configure + build llama-server for the current directory
-# (which must contain the llama.cpp source tree + build_flags.sh alongside it).
+# (which must contain the llama.cpp source tree + cmake-flags.sh alongside it).
 #
 # Why a script and not an inline Docker RUN: Docker runs RUN under /bin/sh
 # (dash), which mis-parses nested bash-array + single/double quoting. Keeping
@@ -20,7 +20,7 @@
 set -euo pipefail
 cd "$(dirname -- "$0")"
 
-[ -f ./build_flags.sh ] || { echo "FATAL: build_flags.sh not next to cmake-build.sh"; exit 1; }
+[ -f ./cmake-flags.sh ] || { echo "FATAL: cmake-flags.sh not next to cmake-build.sh"; exit 1; }
 [ "$#" -ge 2 ]          || { echo "usage: $0 <ui-on|ui-off> <cuda-arch> [extra flags...]"; exit 2; }
 
 mode="$1"
@@ -33,8 +33,8 @@ EXTRA=( "$@" )
 export CC CXX CUDAHOSTCXX
 
 # Source the shared flags (uses a bash array — must run under bash, which we are).
-# shellcheck source=build_flags.sh
-source ./build_flags.sh "$mode"
+# shellcheck source=cmake-flags.sh
+source ./cmake-flags.sh "$mode"
 
 ARGS=( "${CMAKE_FLAGS[@]}" \
        -DCMAKE_CUDA_ARCHITECTURES="$arch" \

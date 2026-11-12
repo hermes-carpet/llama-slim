@@ -2,7 +2,7 @@
 # ggml-org/llama.cpp (master) moves, and publish it as a GitHub Release
 # (.tar.zst) for direct download. No registry, no Docker needed on the target.
 #
-# The bundle ships exactly the features the image does (same build_flags.sh),
+# The bundle ships exactly the features the image does (same cmake-flags.sh),
 # minus the web panel (ui-off): spec decode (draft-dflash / draft-mtp),
 # multi-GPU --split-mode, --n-cpu-moe, model swap (--models-dir +
 # --models-preset), KV-cache quant (-ctk/-ctv), --api-key (LLAMA_API_KEY),
@@ -137,7 +137,7 @@ jobs:
           git checkout -q FETCH_HEAD
           cd ..
           # stage the self-contained helper files into the build context
-          for f in build_flags.sh cmake-build.sh llama-server-run update.sh preset.example.ini; do
+          for f in cmake-flags.sh cmake-build.sh llama-server-run update.sh preset.example.ini; do
             cp "$f" ctx/
           done
           echo "context contents (top):"

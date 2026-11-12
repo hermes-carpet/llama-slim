@@ -171,7 +171,7 @@ If the build or the acceptance test fails, nothing is pushed and
 builds the **same** feature-optimized `llama-server` — but for a Linux x86_64
 host that has only the NVIDIA kernel driver, packaged as a self-contained
 `.tar.zst` bundle and published to **GitHub Releases** (no registry, no Docker
-on the target). It shares `build_flags.sh` with the image, so the two can't
+on the target). It shares `cmake-flags.sh` with the image, so the two can't
 drift in features/optimizations. The bundle omits the web panel (`ui-off`).
 
 Published assets (per release tag `binary-<semver>`):
@@ -210,7 +210,7 @@ binary), committed by the release job; a no-change upstream SHA skips the build.
 
 ## Shared build flags (image + binary)
 
-`build_flags.sh` is the single source of CMake feature/optimization flags,
+`cmake-flags.sh` is the single source of CMake feature/optimization flags,
 sourced by **both** the Docker `Dockerfile` (`ui-on`) and the bare-metal
 `build/Dockerfile.build-bundle` (`ui-off`). Add an optimization once there and
 it lands in both artifacts. Current set includes `GGML_CUDA=ON`,
@@ -226,7 +226,7 @@ environment (arch, ccache, shlib-undefined) is appended per-`Dockerfile`.
 git clone --depth 1 https://github.com/ggml-org/llama.cpp llama-src
 cd llama-src
 cp /path/to/this-repo/Dockerfile /path/to/this-repo/.dockerignore \
-   /path/to/this-repo/entrypoint.sh /path/to/this-repo/build_flags.sh .
+   /path/to/this-repo/entrypoint.sh /path/to/this-repo/cmake-flags.sh .
 docker build -f Dockerfile \
   -t ghcr.io/hermes-carpet/llama-server-cuda-slim:local .
 docker run -d --gpus all -p 8080:8080 -v /models:/models \

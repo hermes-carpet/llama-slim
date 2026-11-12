@@ -64,7 +64,7 @@ COPY . .
 # Configure + build via the committed bash script (Docker's RUN runs under
 # /bin/sh, which mis-parses nested quoting; a bash file avoids that and is
 # also testable). CC/CXX/CUDAHOSTCXX + ccache are handled inside the script,
-# which sources build_flags.sh (source-of-truth flag array).
+# which sources cmake-flags.sh (source-of-truth flag array).
 RUN bash cmake-build.sh ui-on "${CUDA_DOCKER_ARCH}" \
     && mkdir -p /out \
     && cp build/bin/llama-server /out/llama-server \

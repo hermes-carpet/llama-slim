@@ -3,7 +3,7 @@
 # Dockerfile.binary — builds the SAME feature-optimized llama-server as the
 # Docker image, but packages it as a SELF-CONTAINED flat bundle (for a Linux
 # x86_64 host that has only the NVIDIA kernel driver). No web panel
-# (ui-off). The build uses build_flags.sh so it cannot drift from the image.
+# (ui-off). The build uses cmake-flags.sh so it cannot drift from the image.
 #
 # Output layout (the /app of the final "bundle" stage):
 #   llama-server-run       launcher (guard + LD_LIBRARY_PATH)
@@ -30,7 +30,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # The build context (assembled by CI) = the llama.cpp source tree at top level
-# PLUS the helper files (build_flags.sh, cmake-build.sh, llama-server-run,
+# PLUS the helper files (cmake-flags.sh, cmake-build.sh, llama-server-run,
 # update.sh, preset.example.ini). Copy it all in.
 WORKDIR /src
 COPY . .

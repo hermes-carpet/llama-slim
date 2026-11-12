@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# build_flags.sh — SINGLE SOURCE OF TRUTH for the llama.cpp CMake
+# cmake-flags.sh — SINGLE SOURCE OF TRUTH for the llama.cpp CMake
 # feature/optimization flags. Sourced by BOTH the Docker image build and the
 # static-bundle binary build so the two artifacts can never silently drift
 # apart in feature set / optimizations.
 #
 # Usage:
-#     source build_flags.sh            # default: web UI prebuilt bundle ON (image)
-#     source build_flags.sh ui-off     # web UI OFF (binary release — no panel)
+#     source cmake-flags.sh            # default: web UI prebuilt bundle ON (image)
+#     source cmake-flags.sh ui-off     # web UI OFF (binary release — no panel)
 #
 # On success it populates:  CMAKE_FLAGS=( ... )
 # The caller appends the build-environment-specific flags itself:
@@ -47,7 +47,7 @@ case "${1:-ui-on}" in
         CMAKE_FLAGS+=(-DLLAMA_USE_PREBUILT_UI=ON)
         ;;
     *)
-        echo "build_flags.sh: unknown UI mode '${1}' (expected ui-on or ui-off)" >&2
+        echo "cmake-flags.sh: unknown UI mode '${1}' (expected ui-on or ui-off)" >&2
         exit 1
         ;;
 esac
