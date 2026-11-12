@@ -41,10 +41,9 @@ COPY . .
 RUN bash cmake-build.sh ui-off "86-real"
 
 # Assemble the flat, self-contained bundle in /bundle via the committed script
-# (testable; avoids /bin/sh + set -e glob pitfalls in an inline RUN).
-RUN env BUNDLE_OUT=/bundle \
-        CUDA_LIB_DIR=/usr/local/cuda-13.3/targets/x86_64-linux-gnu \
-        bash bundle.sh
+# (testable; avoids /bin/sh + set -e glob pitfalls in an inline RUN). The CUDA
+# runtime libs are auto-discovered — no hardcoded path to drift on base bump.
+RUN env BUNDLE_OUT=/bundle bash bundle.sh
 
 # Final "bundle" stage: the self-contained /app the workflow tars. Plain
 # debian:stable-slim runtime with exactly what the closure needs.

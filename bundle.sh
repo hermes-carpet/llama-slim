@@ -14,23 +14,41 @@
 #   $BUNDLE_OUT/lib/*.so...       real blobs + SONAME symlink chains
 #
 # Usage:
-#   BUNDLE_OUT=/bundle CUDA_LIB_DIR=/usr/local/cuda-13.3/targets/x86_64-linux-gnu \
-#       bash /path/to/bundle.sh
+#   BUNDLE_OUT=/bundle bash /path/to/bundle.sh
 #
-# The three CUDA runtime lib versioned filenames are baked in with hard FATAL
-# guards (fail loudly if the CUDA minor moves; update the list then) —
-# verified: objdump NEEDED on libggml-cuda.so = libcudart.so.13,
-# libcublas.so.13, libcublasLt.so.13 (+ host libcuda.so.1, never bundled).
+# CUDA runtime libs are auto-discovered (no hardcoded path or versioned
+# filenames — the nvidia/cuda base image moved them between cuda-13.3 and
+# the /usr/local/cuda symlink + x86_64-linux / x86_64-linux-gnu between
+# images). We locate the real versioned blobs that libggml-cuda.so NEEDED's:
+# libcudart.so.13, libcublas.so.13, libcublasLt.so.13 (+ host libcuda.so.1,
+# provided by the driver, never bundled).
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
 BUNDLE_OUT="${BUNDLE_OUT:?BUNDLE_OUT required}"
-CUDA_LIB_DIR="${CUDA_LIB_DIR:?CUDA_LIB_DIR required}"
 
 BIN=build/bin/llama-server
 [ -x "$BIN" ] || { echo "FATAL: $BIN not found (run cmake-build.sh first)"; exit 1; }
 
-[ -d "$CUDA_LIB_DIR" ] || { echo "FATAL: CUDA_LIB_DIR '$CUDA_LIB_DIR' not found"; ls /usr/local 2>/dev/null || true; exit 1; }
+# Candidate CUDA lib dirs, best-first: explicit override, then the auto
+# symlink, then any explicit-version dirs, across both target arch spellings.
+# CUDA_SEARCH_ROOT lets tests point at a non-/usr/local tree.
+CUDA_LIB_DIR="${CUDA_LIB_DIR:-}"
+SEARCH_ROOT="${CUDA_SEARCH_ROOT:-/usr/local}"
+CUDA_CANDIDATES=()
+[ -n "$CUDA_LIB_DIR" ] && CUDA_CANDIDATES+=("$CUDA_LIB_DIR")
+for base in "$SEARCH_ROOT"/cuda "$SEARCH_ROOT"/cuda-*; do
+    [ -d "$base" ] || continue
+    for tgt in targets/x86_64-linux/lib64 targets/x86_64-linux-gnu/lib64 lib64 lib; do
+        d="$base/$tgt"
+        [ -d "$d" ] && CUDA_CANDIDATES+=("$d")
+    done
+done
+if [ "${#CUDA_CANDIDATES[@]}" -eq 0 ]; then
+    echo "FATAL: no CUDA lib dir found (tried $SEARCH_ROOT/cuda and $SEARCH_ROOT/cuda-*)"
+    ls "$SEARCH_ROOT" 2>/dev/null || true
+    exit 1
+fi
 
 mkdir -p "$BUNDLE_OUT/lib"
 cp "$BIN" "$BUNDLE_OUT/llama-server"
@@ -55,18 +73,29 @@ done
 [ "$found_ggml_cuda" = 1 ] || { echo "FATAL: libggml-cuda.so missing from build/bin/ (CUDA backend not built?)"; ls -la build/bin/ | grep -i cuda; exit 1; }
 echo "copied $copy_blobs real .so blobs from build/bin/"
 
-# CUDA runtime libs (exact versioned names).
-for lib in \
-    libcudart.so.13.3.29 \
-    libcublas.so.13.5.1.27 \
-    libcublasLt.so.13.5.1.27
-do
-    if [ ! -f "$CUDA_LIB_DIR/$lib" ]; then
-        echo "FATAL: $CUDA_LIB_DIR/$lib missing (CUDA minor moved? update the list)"
-        ls "$CUDA_LIB_DIR" 2>/dev/null | grep -E 'cudart|cublas' | head || true
+# CUDA runtime libs: locate the three real versioned blobs libggml-cuda.so
+# NEEDED's (libcudart.so.13, libcublas.so.13, libcublasLt.so.13) in the first
+# candidate dir that has them. Auto-discovery by SONAME prefix, so a CUDA
+# minor/patch bump is picked up without editing this file.
+cuda_copied=0
+for want in "libcudart.so.13" "libcublas.so.13" "libcublasLt.so.13"; do
+    found=""
+    for d in "${CUDA_CANDIDATES[@]}"; do
+        # match the versioned real file, e.g. libcudart.so.13.3.29
+        for f in "$d/${want}".*; do
+            if [ -f "$f" ] && [ ! -L "$f" ]; then found="$f"; break; fi
+        done
+        [ -n "$found" ] && break
+    done
+    if [ -z "$found" ]; then
+        echo "FATAL: $want (a real versioned file) not found in any CUDA dir:"
+        printf '  %s\n' "${CUDA_CANDIDATES[@]}"
+        ls "${CUDA_CANDIDATES[0]}" 2>/dev/null | grep -E 'cudart|cublas' || true
         exit 1
     fi
-    cp "$CUDA_LIB_DIR/$lib" "$BUNDLE_OUT/lib/"
+    cp "$found" "$BUNDLE_OUT/lib/"
+    echo "CUDA: $(basename "$found")"
+    cuda_copied=$((cuda_copied + 1))
 done
 
 # Rebuild SONAME alias chains as true symlinks (zero bytes on disk):
@@ -88,5 +117,5 @@ for f in lib*.so.[0-9]*; do
 done
 cd - >/dev/null
 
-echo "=== bundle ready: $BUNDLE_OUT ($copy_blobs built blobs + 3 CUDA libs) ==="
+echo "=== bundle ready: $BUNDLE_OUT ($copy_blobs built blobs + $cuda_copied CUDA libs) ==="
 ls -lah "$BUNDLE_OUT" "$BUNDLE_OUT/lib"
