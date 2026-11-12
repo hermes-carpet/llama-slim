@@ -1,0 +1,307 @@
+# Build the SELF-CONTAINED bare-metal llama-server bundle whenever upstream
+# ggml-org/llama.cpp (master) moves, and publish it as a GitHub Release
+# (.tar.zst) for direct download. No registry, no Docker needed on the target.
+#
+# The bundle ships exactly the features the image does (same build_flags.sh),
+# minus the web panel (ui-off): spec decode (draft-dflash / draft-mtp),
+# multi-GPU --split-mode, --n-cpu-moe, model swap (--models-dir +
+# --models-preset), KV-cache quant (-ctk/-ctv), --api-key (LLAMA_API_KEY),
+# --jinja + --tools, --sleep-idle-seconds. CUDA 13 runtime libs are bundled;
+# the only host requirement is the NVIDIA kernel driver.
+#
+# Versioning mirrors the image: pure semver resolved from the highest upstream
+# v* tag ancestor of the build SHA (scripts/resolve-semver.py). Release tag =
+# "binary-<semver>" so it never collides with image tags.
+#
+# State: binary-upstream-sha + binary-release-version (last published binary).
+#
+# Acceptance: the PULLED-ARTEFACT gate — the exact /app payload that gets
+# tarred is extracted on the runner and run with --n-gpu-layers 0 +
+# test-batch.sh (text-only), so a green run means the downloaded file works.
+
+name: auto-release-binary
+
+on:
+  schedule:
+    # Same Tuesday 09:00 UTC cadence as the image; exits in <1 min with no
+    # build when upstream hasn't moved past the last published binary SHA.
+    - cron: '0 9 * * 2'
+  workflow_dispatch:
+    inputs:
+      upstream_sha:
+        description: 'Explicit upstream commit to build (default: latest master)'
+        required: false
+        default: ''
+      force:
+        description: 'Rebuild even if SHA already published'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['false', 'true']
+
+permissions:
+  contents: write   # for the GitHub Release + state-file self-commit
+  packages: read
+
+concurrency:
+  group: auto-release-binary
+  cancel-in-progress: false
+
+env:
+  API_UA: hermes-carpet-llama-slim-ci
+  REL_PREFIX: binary
+
+jobs:
+  check-upstream:
+    runs-on: ubuntu-24.04
+    outputs:
+      build_sha: ${{ steps.check.outputs.build_sha }}
+      changed: ${{ steps.check.outputs.changed }}
+      release_version: ${{ steps.version.outputs.release_version }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Resolve latest upstream master SHA
+        id: latest
+        run: |
+          set -euo pipefail
+          sha=$(curl -fsSL \
+                  -H "Accept: application/vnd.github+json" \
+                  -H "User-Agent: $API_UA" \
+                  https://api.github.com/repos/ggml-org/llama.cpp/commits/master \
+                | python3 -c "import json,sys; print(json.load(sys.stdin)['sha'])")
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Upstream master: $sha"
+
+      - name: Compare with published binary SHA
+        id: check
+        run: |
+          set -euo pipefail
+          latest="${{ steps.latest.outputs.sha }}"
+          explicit="${{ inputs.upstream_sha }}"
+          force="${{ inputs.force }}"
+          [ -n "$explicit" ] && latest="$explicit"
+          current=$(cat binary-upstream-sha 2>/dev/null || echo "")
+          echo "published_sha=${current:-<none>}"
+          echo "candidate_sha=$latest"
+          if [ "$latest" = "$current" ] && [ "$force" != "true" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "build_sha=" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "build_sha=$latest" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Resolve display semver (shared script, same as image)
+        id: version
+        run: |
+          set -euo pipefail
+          sha="${{ steps.check.outputs.build_sha }}"
+          recorded_sha=$(cat binary-upstream-sha 2>/dev/null || echo "")
+          recorded_version=$(cat binary-release-version 2>/dev/null || echo "")
+          v=$(python3 scripts/resolve-semver.py "$sha" "$recorded_sha" "$recorded_version" 2>resolve.log | tail -1 | tr -d '[:space:]')
+          [ -n "$v" ] || v="0.4.0"
+          cat resolve.log || true
+          echo "release_version=$v" >> "$GITHUB_OUTPUT"
+          echo "display version: $v"
+
+  build-binary:
+    needs: check-upstream
+    if: needs.check-upstream.outputs.changed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      UPSTREAM_SHA: ${{ needs.check-upstream.outputs.build_sha }}
+      RELEASE_VERSION: ${{ needs.check-upstream.outputs.release_version }}
+      STAGE_IMG: ghcr.io/hermes-carpet/binary-build:candidate
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space
+        uses: ggml-org/free-disk-space@v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: true
+
+      - name: Fetch upstream llama.cpp at candidate SHA
+        run: |
+          set -euo pipefail
+          mkdir -p ctx && cd ctx
+          git init -q
+          git remote add origin https://github.com/ggml-org/llama.cpp
+          git fetch -q --depth 1 origin "$UPSTREAM_SHA"
+          git checkout -q FETCH_HEAD
+          cd ..
+          # stage the self-contained helper files into the build context
+          for f in build_flags.sh llama-server-run update.sh preset.example.ini; do
+            cp "$f" ctx/
+          done
+          echo "context contents (top):"
+          ls ctx | head
+          echo "checked out $(cd ctx && git rev-parse HEAD)"
+
+      - name: Build bundle image
+        run: |
+          set -euo pipefail
+          docker build \
+            --build-arg APP_VERSION="$RELEASE_VERSION" \
+            -f build/Dockerfile.build-bundle \
+            -t "$STAGE_IMG" \
+            ctx/ | tee build.log
+          docker image ls | grep binary-build || true
+
+      - name: Extract the release payload
+        run: |
+          set -euo pipefail
+          mkdir -p payload
+          docker create --name bundlegrab "$STAGE_IMG" true >/dev/null
+          docker cp bundlegrab:/app/. payload/
+          docker rm -f bundlegrab >/dev/null
+          echo "=== payload (what ships) ==="
+          ls -lah payload payload/lib
+          du -sh payload
+
+      - name: Download acceptance model (Qwen3.5-9B UD-Q4_K_XL)
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/llama-models
+          if [ ! -f /tmp/llama-models/Qwen3.5-9B-UD-Q4_K_XL.gguf ]; then
+            curl -L --fail --retry 3 -o /tmp/llama-models/Qwen3.5-9B-UD-Q4_K_XL.gguf \
+              "https://huggingface.co/unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-UD-Q4_K_XL.gguf"
+          fi
+          sha256sum /tmp/llama-models/*
+
+      - name: Run the PULLED-ARTEFACT gate (CPU text, on the exact payload)
+        run: |
+          set -uo pipefail
+          # Run the real shipped launcher on its real payload with a CPU run.
+          # The bundle carries the CUDA libs; --n-gpu-layers 0 means the CUDA
+          # backend is never dlopen'd, so it runs on a driver-less runner.
+          chmod +x payload/llama-server-run payload/llama-server
+          ./payload/llama-server-run --n-gpu-layers 0 --model /tmp/llama-models/Qwen3.5-9B-UD-Q4_K_XL.gguf \
+            --ctx-size 8192 --host 127.0.0.1 --port 8080 &
+          SRV_PID=$!
+
+          ( for i in $(seq 1 180); do
+              if curl -sf --max-time 2 http://127.0.0.1:8080/health >/dev/null; then
+                echo "healthy after ${i} attempts"; break
+              fi
+              sleep 5
+            done )
+
+          mkdir -p /tmp/bin-test-run
+          cp test-batch.sh /tmp/bin-test-run/
+          ok=1
+          (cd /tmp/bin-test-run && TIMEOUT=1800 BASE_URL=http://127.0.0.1:8080 SKIP_VISION=true bash test-batch.sh) || ok=0
+          kill "$SRV_PID" 2>/dev/null || true
+          if [ "$ok" != "1" ]; then
+            echo "FATAL: pulled-artifact CPU gate failed (log below)"
+            tail -60 /tmp/bin-test-run/* 2>/dev/null || true
+            exit 1
+          fi
+          echo "gate passed"
+
+      - name: Package tar.zst + checksum
+        run: |
+          set -euo pipefail
+          asset_name="llama-server-cuda-slim-linux-x86_64-cuda13-sm86-${RELEASE_VERSION}.tar.zst"
+          tar -I zstd -cf "$asset_name" -C payload .
+          sha256sum "$asset_name" > "$asset_name.sha256"
+          ls -lh "$asset_name" "$asset_name.sha256"
+          echo "== version file in payload =="
+          cat payload/VERSION 2>/dev/null || echo "(no VERSION)"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: binary-bundle-${{ env.RELEASE_VERSION }}
+          path: |
+            build.log
+            llama-server-cuda-slim-linux-x86_64-cuda13-sm86-*.tar.zst
+            llama-server-cuda-slim-linux-x86_64-cuda13-sm86-*.tar.zst.sha256
+          retention-days: 14
+          if-no-files-found: error
+
+  release-binary:
+    needs: [check-upstream, build-binary]
+    if: needs.check-upstream.outputs.changed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      RELEASE_VERSION: ${{ needs.check-upstream.outputs.release_version }}
+      UPSTREAM_SHA: ${{ needs.check-upstream.outputs.build_sha }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: binary-bundle-${{ needs.check-upstream.outputs.release_version }}
+          path: artifacts
+
+      - name: Render release body
+        run: |
+          set -euo pipefail
+          python3 - "$RELEASE_VERSION" "$UPSTREAM_SHA" <<'PY'
+          import sys
+          ver, sha = sys.argv[1], sys.argv[2]
+          t = open("release-notes-binary.md.tmpl").read()
+          repo = "hermes-carpet/llama-slim"
+          asset = f"llama-server-cuda-slim-linux-x86_64-cuda13-sm86-{ver}.tar.zst"
+          out = t.replace("RELEASE-TAG", f"binary-{ver}") \
+                 .replace("ASSET-NAME", asset) \
+                 .replace("SHORT-SHA", sha[:12]) \
+                 .replace("OWNER-REPO", repo)
+          open("BODY.md", "w").write(out)
+          print(f"rendered BODY.md ({len(out)} bytes) for v{ver} @ {sha[:12]}")
+          PY
+
+      - name: Create GitHub Release + upload assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${REL_PREFIX}-$RELEASE_VERSION"
+          asset=$(find artifacts -name '*.tar.zst' | head -1)
+          sha=$(find artifacts -name '*.tar.zst.sha256' | head -1)
+          echo "publishing tag $tag  asset=$(basename "$asset")"
+
+          # Idempotent: clear any existing release tag (a stale tag 422s POST)
+          for attempt in 1 2 3; do
+            exists=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/$tag" --jq '.id' 2>/dev/null || echo "")
+            if [ -z "$exists" ]; then break; fi
+            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/$exists"
+            sleep 3
+          done
+
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/releases" \
+            -f "tag_name=$tag" \
+            -f "name=llama-server-cuda-slim $RELEASE_VERSION (linux-x86_64, CUDA 13, sm86)" \
+            -f "target_commitish=$GITHUB_SHA" \
+            -f "prerelease=false" \
+            -F "body=@BODY.md"
+
+          gh release upload "$tag" "$asset" "$sha" --clobber
+          echo "published $tag"
+
+      - name: Advance state + commit
+        if: success()
+        run: |
+          set -euo pipefail
+          echo "$UPSTREAM_SHA" > binary-upstream-sha
+          echo "$RELEASE_VERSION" > binary-release-version
+          git config user.name  "hermes-carpet"
+          git config user.email "hermes-carpet@users.noreply.github.com"
+          git add binary-upstream-sha binary-release-version
+          if git diff --cached --quiet; then
+            echo "state already current"
+          else
+            git commit -m "binary: publish ${REL_PREFIX}-${RELEASE_VERSION} for upstream $UPSTREAM_SHA"
+            git pull --rebase origin main
+            git push
+            echo "pushed binary state"
+          fi

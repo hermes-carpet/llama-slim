@@ -119,88 +119,15 @@ jobs:
             exit 0
           fi
           sha="${{ steps.check.outputs.build_sha }}"
-          # Fast path: already published this SHA -> reuse recorded version.
-          if [ -n "$sha" ] && [ "$sha" = "$(cat upstream-sha 2>/dev/null || echo '')" ]; then
-            v=$(cat release-version 2>/dev/null || echo "")
-            echo "reusing recorded release-version: $v"
-            echo "release_version=${v:-0.4.0}" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # Gather upstream v* tag -> commit pairs.
-          python3 - "$sha" <<'PYEOF'
-          import json, os, sys, urllib.request
-
-          OUTPUT = os.environ.get("GITHUB_OUTPUT")
-          def emit(k, v):
-              # Append `k=v` to the GITHUB_OUTPUT file (Actions contract).
-              with open(OUTPUT, "a") as f:
-                  f.write(f"{k}={v}\n")
-
-          def get(url):
-              req = urllib.request.Request(
-                  url, headers={"Accept": "application/vnd.github+json",
-                                "User-Agent": os.environ.get("API_UA", "llama-slim-ci")})
-              with urllib.request.urlopen(req, timeout=30) as r:
-                  return json.load(r)
-
-          def ver_key(v):
-              parts = v.lstrip("v").split(".")
-              while len(parts) < 3:
-                  parts.append("0")
-              try:
-                  return tuple(int(p) for p in parts[:3])
-              except ValueError:
-                  return (0, 0, 0)
-
-          def ver_max(cands):
-              # Highest semver tag name among a list of (name, shortsha) tuples.
-              return max(cands, key=lambda c: ver_key(c[0]))[0]
-
-          sha = sys.argv[1]
-          tags = []
-          for page in (1, 2, 3):
-              batch = get(f"https://api.github.com/repos/ggml-org/llama.cpp/tags?per_page=100&page={page}")
-              if not isinstance(batch, list) or not batch:
-                  break
-              tags.extend(batch)
-          candidates = []
-          for t in tags:
-              name = t.get("name", "")
-              if not (name.startswith("v") and name[1:2].isdigit()):
-                  continue
-              c = t.get("commit", {})
-              tc = (c.get("sha") or "") if isinstance(c, dict) else "".join(str(x) for x in c)
-              if tc:
-                  candidates.append((name, tc[:12]))
-          print(f"upstream semver tags: {len(candidates)}")
-          if not candidates:
-              sys.stderr.write("WARN: no upstream release tags found; defaulting to v0.4.0\n")
-              emit("release_version", "0.4.0")
-              sys.exit(0)
-
-          def ancestor(base, sha):
-              # True if base is the same as or an ancestor of sha.
-              # compare `<base>...<sha>` (2-dot): status "ahead" => sha newer
-              # than base (base is an ancestor); "identical" => same commit.
-              d = get(f"https://api.github.com/repos/ggml-org/llama.cpp/compare/{base}...{sha}")
-              return d.get("status") in ("ahead", "identical")
-
-          # Pick the highest upstream semver tag that is an ancestor of /
-          # identical to the build sha. Deterministic (max by semver), not
-          # dependent on the API's tag ordering.
-          versions = []
-          for name, short in candidates:
-              if ancestor(name, sha) or name.removeprefix("v") in sha:
-                  versions.append(name)
-                  print(f"  ancestor: {name} (tag commit {short})")
-          if versions:
-              version = max(versions, key=lambda n: ver_key(n))[1:]
-              print(f"resolved highest ancestor semver: v{version}")
-          else:
-              version = ver_max(candidates)[1:]
-              print(f"note: no release-tag ancestor; falling back to highest known v{version}")
-          emit("release_version", version)
-          PYEOF
+          # Shared script (same as the binary pipeline) resolves the display
+          # semver + fast-path reuse of a recorded version.
+          recorded_sha=$(cat upstream-sha 2>/dev/null || echo "")
+          recorded_version=$(cat release-version 2>/dev/null || echo "")
+          v=$(python3 scripts/resolve-semver.py "$sha" "$recorded_sha" "$recorded_version" 2>resolve.log | tail -1 | tr -d '[:space:]')
+          [ -n "$v" ] || v="0.4.0"
+          cat resolve.log || true
+          echo "release_version=$v" >> "$GITHUB_OUTPUT"
+          echo "display version: $v"
 
   build-test-push:
     needs: check-upstream
@@ -238,7 +165,7 @@ jobs:
       - name: Stage Dockerfile into build context
         run: |
           set -euo pipefail
-          cp Dockerfile .dockerignore entrypoint.sh upstream/
+          cp Dockerfile .dockerignore entrypoint.sh build_flags.sh upstream/
           ls -la upstream | head
 
       - name: Log in to GHCR
@@ -327,7 +254,7 @@ jobs:
 
       - name: Upload artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: accept-report-${{ env.UPSTREAM_SHA }}
           path: |

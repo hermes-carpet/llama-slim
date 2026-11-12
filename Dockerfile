@@ -65,17 +65,14 @@ COPY . .
 # GGML_BACKEND_DL + --allow-shlib-undefined => libcuda.so.1 is needed ONLY at
 # runtime (kernel driver via the container runtime). NCCL: nvidia/cuda:13.x
 # images don't ship it; CMake's FindNCCL warns and skips (single-GPU).
-RUN ccache -z \
+# Feature/optimization flags come from build_flags.sh (source of truth,
+# shared with the bare-metal bundle so the image and binary never drift).
+# ui-on = embed the prebuilt web UI. Build-environment flags + CUDA arch
+# are appended here; the source dir is the image context (".").
+RUN CMAKE_FEATURE_FLAGS="$(bash -c '. ./build_flags.sh ui-on; printf "%s " "${CMAKE_FLAGS[@]}")" \
+    && ccache -z \
     && cmake -B build \
-        -DGGML_NATIVE=OFF \
-        -DGGML_CUDA=ON \
-        -DGGML_BACKEND_DL=ON \
-        -DGGML_CPU_ALL_VARIANTS=OFF \
-        -DLLAMA_BUILD_TESTS=OFF \
-        -DLLAMA_BUILD_EXAMPLES=OFF \
-        -DLLAMA_BUILD_APP=OFF \
-        -DLLAMA_BUILD_SERVER=ON \
-        -DLLAMA_USE_PREBUILT_UI=ON \
+        $CMAKE_FEATURE_FLAGS \
         -DCMAKE_CUDA_ARCHITECTURES="${CUDA_DOCKER_ARCH}" \
         -DCMAKE_C_COMPILER_LAUNCHER=ccache \
         -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \

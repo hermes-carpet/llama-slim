@@ -1,0 +1,151 @@
+#!/bin/sh
+# ---------------------------------------------------------------------------
+# llama-server-run — launcher for the self-contained llama-server bundle.
+#
+# What it does (and why it exists):
+#   1. Puts the bundled library dir on LD_LIBRARY_PATH so the host only needs
+#      the NVIDIA kernel driver (libcuda.so.1) — no CUDA toolkit packages, no
+#      apt, no host lib path fiddling. Same host contract as the Docker image.
+#   2. `doctor` subcommand — checks driver, bundled libs, and GPU arch, and
+#      prints an actionable report (so a bad box fails loudly with a fix, not
+#      a cryptic dlopen error).
+#   3. When a GPU is requested, verifies the driver is present and prints an
+#      actionable banner if it is missing (instead of dying in libggml-cuda).
+#   4. Everything else passes straight through: every LLAMA_ARG_* env var,
+#      LLAMA_API_KEY, LLAMA_CACHE / HF_* (download cache), and any CLI flag
+#      (--split-mode, --spec-type draft-dflash,draft-mtp, --models-preset,
+#      -ctk/-ctv, --n-cpu-moe, --jinja, --tools, ...) is honored by the binary.
+#
+# Usage:
+#   llama-server-run <any llama-server args>
+#   llama-server-run doctor
+#   llama-server-run -h | --help
+# ---
+set -u
+
+DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
+BIN="$DIR/llama-server"
+LIBDIR="$DIR/lib"
+
+export LD_LIBRARY_PATH="$LIBDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+# ---- subcommands -----------------------------------------------------------
+case "${1:-}" in
+    -h|--help|help)
+        cat <<'HELP'
+llama-server-run — launcher for the self-contained llama-server bundle
+
+This wrapper sets LD_LIBRARY_PATH to the bundled libs, guards the NVIDIA
+driver, and then execs the real `llama-server`, passing your args through
+unchanged. Every feature is a normal llama-server flag / env var:
+
+  GPU / multi-GPU:
+    --n-gpu-layers N            GPU offload layers (99 = all)
+    --split-mode {none,layer,row,tensor}   multi-GPU split strategy
+    --n-cpu-moe N               keep first N MoE expert layers on CPU
+
+  Speculative decoding (your "dflash2 / mtp"):
+    --spec-type draft-dflash,draft-mtp     comma list
+    --spec-draft-hf user/repo:gpt-oss-120b-dflash
+    env LLAMA_DFLASH_DEV=0                 disable dflash dev-buffer path
+
+  Model swap (router mode — clears one model's VRAM, loads the next):
+    --models-dir /path/to/models
+    --models-preset /path/to/preset.ini     INI, like an Ollama Modelfile
+    --models-max 1                          keep at most 1 model resident
+
+  KV cache quantization:
+    -ctk/--cache-type-k q8_0  -ctv/--cache-type-v q8_0
+    (env LLAMA_ARG_CACHE_TYPE_K / LLAMA_ARG_CACHE_TYPE_V)
+
+  Auth / cache / tools / templates:
+    LLAMA_API_KEY=k1,k2          (or --api-key / LLAMA_ARG_API_KEY_FILE)
+    LLAMA_CACHE=/path            HF model download + cache dir
+    HF_TOKEN=***                HF auth for gated models
+    --jinja (default on)         tool-aware chat templates
+    --tools all                  enable built-in tools
+
+  Power:
+    --sleep-idle-seconds N       sleep (free VRAM/RAM) after N s idle, -1=off
+
+Examples:
+  llama-server-run --models-preset /etc/llama/presets.ini --models-max 1
+  llama-server-run -hf owner/model:Q4_K_M --n-gpu-layers 99 --split-mode layer \
+                   --spec-type draft-dflash -ctk q8_0 -ctv q8_0 -fa on
+  llama-server-run doctor
+HELP
+        exit 0
+        ;;
+    doctor)
+        rc=0
+        echo "=== llama-server-run doctor ==="
+        echo "bundle dir : $DIR"
+        echo "binary     : $BIN $([ -x "$BIN" ] && echo '(present, executable)' || { echo '(MISSING)'; rc=1; })"
+        echo "lib dir    : $LIBDIR"
+        # bundled CUDA toolkit libs must be present
+        for lib in libcudart.so.13 libcublas.so.13 libcublasLt.so.13; do
+            if ls "$LIBDIR/$lib"* >/dev/null 2>&1; then
+                echo "  bundled $lib : OK ($(ls "$LIBDIR/$lib"* | xargs -n1 basename | tr '\n' ' '))"
+            else
+                echo "  bundled $lib : MISSING (rc=1)" >&2; rc=1
+            fi
+        done
+        # host driver
+        if command -v nvidia-smi >/dev/null 2>&1; then
+            if nvidia-smi --query-gpu=name,driver_version --format=csv,noheader 2>/dev/null; then
+                echo "  driver OK (see above)"
+            else
+                echo "  driver PRESENT but nvidia-smi failed — reload modules" >&2; rc=1
+            fi
+        else
+            echo "  nvidia-smi: MISSING — either no NVIDIA driver, or CPU-only (pass --n-gpu-layers 0)" >&2
+        fi
+        # libcuda.so.1 resolvable
+        if ldconfig -p 2>/dev/null | grep -q 'libcuda\.so\.1'; then
+            echo "  libcuda.so.1 : OK (host driver on the default path)"
+        else
+            echo "  libcuda.so.1 : NOT on default ld path — export LD_LIBRARY_PATH to the driver dir, or ensure the nvidia driver is installed" >&2
+        fi
+        # the binary's own closure, minus the driver (expected absent in CI)
+        missing="$(ldd "$BIN" 2>/dev/null | grep 'not found' | grep -v 'libcuda.so.1' | awk '{print $1}' | sort -u)"
+        if [ -n "$missing" ]; then
+            echo "  binary ldd: UNRESOLVED (beyond the expected driver):" >&2
+            printf '     %s\n' $missing >&2; rc=1
+        else
+            echo "  binary ldd : clean (only the driver may be absent, which is fine for --n-gpu-layers 0)"
+        fi
+        [ "$rc" = 0 ] && echo "=== doctor: OK ===" || echo "=== doctor: PROBLEMS above (fix and re-run) ==="
+        exit "$rc"
+        ;;
+esac
+
+# ---- GPU guard: driver present when a GPU would be requested ---------------
+gpu_req=1
+prev=""
+for a in "$@"; do
+    if [ "$prev" = "--n-gpu-layers" ] || [ "$prev" = "-ngl" ]; then
+        case "$a" in 0) gpu_req=0 ;; esac
+    fi
+    prev="$a"
+done
+if [ "$gpu_req" = "1" ]; then
+    if ! ldconfig -p 2>/dev/null | grep -q 'libcuda\.so\.1' && ! ls /usr/lib/x86_64-linux-gnu/libcuda.so.1 >/dev/null 2>&1; then
+        {
+            echo "================================================================"
+            echo " FATAL: a GPU was requested but the NVIDIA driver (libcuda.so.1)"
+            echo " was not found on this host."
+            echo ""
+            echo " This bundle ships the CUDA toolkit libs (cudart/cublas); it REQUIRES"
+            echo " the host kernel driver. Fixes:"
+            echo "   1. install the NVIDIA driver:  sudo apt install nvidia-driver-<ver>"
+            echo "   2. or run CPU-only:           llama-server-run --n-gpu-layers 0 ..."
+            echo "   3. or point LD_LIBRARY_PATH at the driver dir, then re-run"
+            echo ""
+            echo " Run 'llama-server-run doctor' for a full report."
+            echo "================================================================"
+        } >&2
+        exit 1
+    fi
+fi
+
+exec "$BIN" "$@"

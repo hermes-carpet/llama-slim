@@ -1,0 +1,111 @@
+# syntax=docker/dockerfile:1
+#
+# Dockerfile.binary — builds the SAME feature-optimized llama-server as the
+# Docker image, but packages it as a SELF-CONTAINED flat bundle (for a Linux
+# x86_64 host that has only the NVIDIA kernel driver). No web panel
+# (ui-off). The build uses build_flags.sh so it cannot drift from the image.
+#
+# Output layout (the /app of the final "bundle" stage):
+#   llama-server-run       launcher (guard + LD_LIBRARY_PATH)
+#   llama-server           the binary
+#   lib/*.so..             llama/ggml closure + CUDA 13 runtime libs
+#   preset.example.ini
+#   update.sh              self-updater (downloads itself from GitHub Releases)
+#   VERSION
+#
+# CI (auto-release-binary.yml) does the tar.zst + CPU gate against /app.
+
+FROM nvidia/cuda:13.3.0-devel-ubuntu24.04 AS build
+
+ARG GCC_VERSION=14
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    CC=gcc-${GCC_VERSION} CXX=g++-${GCC_VERSION} CUDAHOSTCXX=g++-${GCC_VERSION}
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential gcc-${GCC_VERSION} g++-${GCC_VERSION} \
+        cmake ccache git ca-certificates python3 curl \
+        libssl-dev libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# The build context (assembled by CI) = the llama.cpp source tree at top level
+# PLUS the helper files (build_flags.sh, llama-server-run, update.sh,
+# preset.example.ini). Copy it all in; build_flags.sh lives at ./ in the
+# context so the cmake flag-expansion below can source it.
+WORKDIR /src
+COPY . .
+
+RUN CMAKE_FEATURE_FLAGS="$(bash -c '. ./build_flags.sh ui-off; printf "%s " "${CMAKE_FLAGS[@]}")" \
+    && cmake -B build \
+        $CMAKE_FEATURE_FLAGS \
+        -DCMAKE_CUDA_ARCHITECTURES="86-real" \
+        -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+        -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+        -DCMAKE_EXE_LINKER_FLAGS=-Wl,--allow-shlib-undefined \
+        . \
+    && cmake --build build --config Release -j"$(nproc)"
+
+# Assemble the flat, self-contained bundle in /bundle.
+RUN set -e \
+    && B=/bundle && mkdir -p "$B/lib" \
+    && cp build/bin/llama-server "$B/llama-server" \
+    && chmod +x "$B/llama-server" \
+    # every bundled .so the server + CUDA backend actually need (real files):
+    && for s in libllama-server-impl.so libllama-common.so.0* libllama.so.0*\
+                libggml.so.0* libggml-base.so.0* libggml-cpu.so \
+                libggml-cuda.so libmtmd.so.0*; do \
+         [ -e "build/bin/$s" ] && cp "build/bin/$s" "$B/lib/" || \
+           { echo "FATAL: required blob missing: $s"; ls -la build/bin/ | head; exit 1; }; \
+       done \
+    # CUDA 13 runtime libs (the exact closure libggml-cuda.so links; the
+    # versioned names — update if the CUDA minor moves) + SONAME symlinks:
+    && D=/usr/local/cuda-13.3/targets/x86_64-linux-gnu \
+       ; for lib in libcudart.so.13.3.29 libcublas.so.13.5.1.27 \
+         libcublasLt.so.13.5.1.27; do \
+         [ -f "$D/$lib" ] || { echo "FATAL: $D/$lib missing (CUDA minor moved?)"; ls "$D" | grep -E 'cudart|cublas' | head; exit 1; }; \
+         cp "$D/$lib" "$B/lib/"; \
+       done \
+    && cd "$B/lib" \
+    && for f in lib*.so.[0-9]*; do \
+         name=$(basename "$f"); prefix=${name%%.so.*}; rest=${name##*.so.}; \
+         major=${rest%%.*}; link1=${prefix}.so.${major}; \
+         if [ "$name" != "$link1" ] && [ ! -e "$link1" ]; then ln -s "$name" "$link1"; fi; \
+         if [ ! -e "${prefix}.so" ]; then ln -s "$link1" "${prefix}.so"; fi; \
+       done \
+    && echo "=== bundle lib/ (real blobs + SONAME symlinks) ===" \
+    && ls -lah "$B" "$B/lib"
+
+# Final "bundle" stage: the self-contained /app the workflow tars. Plain
+# debian:stable-slim runtime with exactly what the closure needs.
+FROM debian:stable-slim AS bundle
+
+ARG APP_VERSION=""
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libgomp1 libssl3t64 libstdc++6 ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# debian stable may name libssl3 / libcurl4 with t64 suffix; create the
+# unsuffixed SONAME aliases the binary links, in case of a mismatch.
+RUN set -e; \
+    cd /lib/x86_64-linux-gnu \
+    && for a in libssl.so.3 libcrypto.so.3 libcurl.so.4 \
+                libgomp.so.1 libstdc++.so.6; do \
+         if [ ! -e "$a" ]; then \
+           cand=$(ls ${a%.*}*.so* 2>/dev/null | head -1 || true); \
+           if [ -n "$cand" ]; then ln -s "$cand" "$a"; fi; \
+         fi; \
+       done \
+    && echo "runtime lib aliases OK"
+
+WORKDIR /app
+COPY --from=build /bundle/llama-server /app/llama-server
+COPY --from=build /bundle/lib /app/lib
+COPY llama-server-run update.sh preset.example.ini /app/
+RUN chmod +x /app/llama-server-run /app/llama-server /app/update.sh \
+    && echo "${APP_VERSION}" > /app/VERSION \
+    && echo "=== /app (the release payload) ===" \
+    && ls -lah /app && du -sh /app

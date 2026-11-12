@@ -10,9 +10,9 @@ jobs:
       packages: write
       actions: read
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Drop stray cuda-13.3 tag via REST Packages API
         env:
-          GH_TOKEN: ***
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 scripts/cleanup-tags.py

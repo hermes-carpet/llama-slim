@@ -136,6 +136,8 @@ safe (same SONAME) and pass. `--n-gpu-layers 0` runs skip the guard entirely
 
 ## CI / auto-updates
 
+### Images (Docker)
+
 `.github/workflows/auto-rebuild.yml` runs:
 
 - **Every Tuesday at 09:00 UTC** (cron) — polls `ggml-org/llama.cpp`
@@ -163,6 +165,60 @@ On a new upstream SHA it:
 If the build or the acceptance test fails, nothing is pushed and
 `:latest` still points at the last passing image.
 
+### Bare-metal binaries (GitHub Releases)
+
+`.github/workflows/auto-release-binary.yml` (same Tuesday-09:00 UTC cadence)
+builds the **same** feature-optimized `llama-server` — but for a Linux x86_64
+host that has only the NVIDIA kernel driver, packaged as a self-contained
+`.tar.zst` bundle and published to **GitHub Releases** (no registry, no Docker
+on the target). It shares `build_flags.sh` with the image, so the two can't
+drift in features/optimizations. The bundle omits the web panel (`ui-off`).
+
+Published assets (per release tag `binary-<semver>`):
+
+- `llama-server-cuda-slim-linux-x86_64-cuda13-sm86-<semver>.tar.zst` (+ `.sha256`)
+
+Extracted layout:
+
+```
+llama-server-run        launcher (LD_LIBRARY_PATH + driver guard + `doctor`)
+llama-server            the binary
+lib/*.so..              llama/ggml closure + CUDA 13 runtime libs
+preset.example.ini      Modelfile-like model-swap preset (INI)
+update.sh               self-update from GitHub Releases (--check / --dry-run)
+VERSION
+```
+
+Install + run:
+
+```sh
+curl -fL -o b.tar.zst https://github.com/hermes-carpet/llama-slim/releases/latest/download/<asset>
+sudo mkdir -p /opt/llama && sudo tar -C /opt/llama --zstd -xzf b.tar.zst
+/opt/llama/llama-server-run doctor
+
+# single model
+/opt/llama/llama-server-run -hf owner/model:Q4_K_M --n-gpu-layers 99 \
+  --split-mode layer --spec-type draft-dflash -ctk q8_0 -ctv q8_0 -fa on \
+  --api-key your-key
+
+# model swap (router mode, VRAM-freed per request)
+/opt/llama/llama-server-run --models-preset /opt/llama/preset.example.ini --models-max 1
+```
+
+State files: `binary-upstream-sha` + `binary-release-version` (last published
+binary), committed by the release job; a no-change upstream SHA skips the build.
+
+## Shared build flags (image + binary)
+
+`build_flags.sh` is the single source of CMake feature/optimization flags,
+sourced by **both** the Docker `Dockerfile` (`ui-on`) and the bare-metal
+`build/Dockerfile.build-bundle` (`ui-off`). Add an optimization once there and
+it lands in both artifacts. Current set includes `GGML_CUDA=ON`,
+`GGML_BACKEND_DL=ON`, `GGML_CPU_ALL_VARIANTS=OFF`, `GGML_NATIVE=OFF`, and
+**`GGML_CUDA_FA_ALL_QUANTS=ON`** (FlashAttention kernels for every quantized KV
+cache type, so `-ctk`/`-ctv q8_0`/`q4_0` actually use FA). CUDA build
+environment (arch, ccache, shlib-undefined) is appended per-`Dockerfile`.
+
 ## Local build (no CI)
 
 ```sh
@@ -170,7 +226,7 @@ If the build or the acceptance test fails, nothing is pushed and
 git clone --depth 1 https://github.com/ggml-org/llama.cpp llama-src
 cd llama-src
 cp /path/to/this-repo/Dockerfile /path/to/this-repo/.dockerignore \
-   /path/to/this-repo/entrypoint.sh .
+   /path/to/this-repo/entrypoint.sh /path/to/this-repo/build_flags.sh .
 docker build -f Dockerfile \
   -t ghcr.io/hermes-carpet/llama-server-cuda-slim:local .
 docker run -d --gpus all -p 8080:8080 -v /models:/models \

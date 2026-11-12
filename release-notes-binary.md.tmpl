@@ -1,0 +1,50 @@
+## Bare-metal `llama-server` bundle (Linux x86_64, CUDA 13, sm_86)
+
+Self-contained: the CUDA 13 runtime libs are bundled; the host only needs the
+**NVIDIA kernel driver**. No Docker required. All image features are built via
+the same `build_flags.sh`; the web panel is omitted.
+
+### Features
+- Speculative decode: `--spec-type draft-dflash,draft-mtp`
+- Multi-GPU: `--split-mode {none,layer,row,tensor}`
+- `--n-cpu-moe N` (MoE expert offload)
+- Model swap (router mode): `--models-dir` + `--models-preset` (INI, Modelfile-like)
+- KV-cache quant: `-ctk`/`-ctv` (FA covers quants via `GGML_CUDA_FA_ALL_QUANTS=ON`)
+- Auth: `LLAMA_API_KEY` (or `--api-key` / `--api-key-file`)
+- `--jinja` (on) + `--tools`
+- `--sleep-idle-seconds N`
+- HF: `-hf owner/repo:quant`, `LLAMA_CACHE`, `HF_TOKEN`
+
+### Install
+```bash
+set -e
+curl -fL -o llama-bundle.tar.zst \
+  https://github.com/OWNER-REPO/releases/download/RELEASE-TAG/ASSET-NAME
+curl -fL -o llama-bundle.tar.zst.sha256 \
+  https://github.com/OWNER-REPO/releases/download/RELEASE-TAG/ASSET-NAME.sha256
+sha256sum -c llama-bundle.tar.zst.sha256
+sudo mkdir -p /opt/llama
+sudo tar -C /opt/llama --zstd -xf llama-bundle.tar.zst
+/opt/llama/llama-server-run doctor
+```
+
+### Run
+```bash
+# single model
+/opt/llama/llama-server-run -hf owner/model:Q4_K_M \
+  --n-gpu-layers 99 --split-mode layer --spec-type draft-dflash \
+  -ctk q8_0 -ctv q8_0 -fa on --api-key your-api-key
+
+# or multi-model router (model swap)
+cp /opt/llama/preset.example.ini /etc/llama/presets.ini
+/opt/llama/llama-server-run --models-preset /etc/llama/presets.ini --models-max 1
+```
+
+### Self-update
+```bash
+/opt/llama/update.sh
+/opt/llama/update.sh --check
+/opt/llama/update.sh --dry-run
+```
+
+Built from `ggml-org/llama.cpp` @ SHORT-SHA.
