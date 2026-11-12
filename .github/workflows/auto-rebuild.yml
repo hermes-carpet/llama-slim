@@ -165,7 +165,7 @@ jobs:
       - name: Stage Dockerfile into build context
         run: |
           set -euo pipefail
-          cp Dockerfile .dockerignore entrypoint.sh build_flags.sh upstream/
+          cp Dockerfile .dockerignore entrypoint.sh build_flags.sh cmake-build.sh upstream/
           ls -la upstream | head
 
       - name: Log in to GHCR

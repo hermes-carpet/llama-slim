@@ -137,7 +137,7 @@ jobs:
           git checkout -q FETCH_HEAD
           cd ..
           # stage the self-contained helper files into the build context
-          for f in build_flags.sh llama-server-run update.sh preset.example.ini; do
+          for f in build_flags.sh cmake-build.sh llama-server-run update.sh preset.example.ini; do
             cp "$f" ctx/
           done
           echo "context contents (top):"
