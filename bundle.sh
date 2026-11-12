@@ -5,13 +5,22 @@
 # where:
 #   build/bin/llama-server        the freshly built binary
 #   build/bin/lib*.so*            the linked llama/ggml closure (with symlinks)
-#   $CUDA_LIB_DIR                 the CUDA 13 toolkit lib dir with the three
-#                                 runtime libs (cudart/cublas/cublasLt)
 #
-# Produces (flat layout — this exactly mirrors what CI extracts from the
-# image and tars as the release artifact):
+# Produces a FLAT bundle — the binary and every .so in ONE directory. This
+# exactly mirrors the working Docker image (binary + all .so flat in /app),
+# and it is required by llama.cpp's backend PLUGIN loader:
+#
+#   ggml_backend_load_all() (ggml/src/ggml-backend-reg.cpp) does NOT use
+#   LD_LIBRARY_PATH and does NOT search subdirectories. When no GGML_BACKEND_DIR
+#   is baked in at compile time it searches only: the executable's own
+#   directory and the CWD, matching  libggml-<name>-*.so  (and, as a fallback,
+#   the unversioned  libggml-<name>.so). Putting the backends in a lib/ subdir
+#   therefore makes them invisible -> "no backends are loaded" -> the server
+#   can't load any model. Flat = the backends sit next to llama-server, so the
+#   loader finds them wherever the user extracts the tarball.
+#
 #   $BUNDLE_OUT/llama-server
-#   $BUNDLE_OUT/lib/*.so...       real blobs + SONAME symlink chains
+#   $BUNDLE_OUT/lib*.so...        real blobs + SONAME symlink chains (flat)
 #
 # Usage:
 #   BUNDLE_OUT=/bundle bash /path/to/bundle.sh
@@ -50,28 +59,33 @@ if [ "${#CUDA_CANDIDATES[@]}" -eq 0 ]; then
     exit 1
 fi
 
-mkdir -p "$BUNDLE_OUT/lib"
+mkdir -p "$BUNDLE_OUT"
 cp "$BIN" "$BUNDLE_OUT/llama-server"
 chmod +x "$BUNDLE_OUT/llama-server"
 
-# Copy EVERY real (non-symlink) .so blob in build/bin/ — the server's impl
-# chain, ggml/ggml-cpu/ggml-cuda, mtmd (vision decode), llama-common, and
-# anything the layout adds later. No hardcoded name list: upstream renamed /
-# split the common libs (llama-common -> common-base/common) between builds,
-# and a stale list breaks the bundle build (the image Dockerfile has used
-# this same "copy all real blobs" approach for the reason: it just tracks).
+# Copy EVERY real (non-symlink) .so blob in build/bin/, FLAT, next to the
+# binary — the server's impl chain, ggml/ggml-cpu/ggml-cuda backends, mtmd
+# (vision decode), llama-common, and anything the layout adds later. No
+# hardcoded name list: upstream renamed/split the common libs between builds,
+# and a stale list breaks the bundle build (the image Dockerfile has used this
+# same "copy all real blobs" approach for the reason: it just tracks).
 copy_blobs=0
-found_ggml_cuda=0
+found_cpu=0
+found_cuda=0
 for f in build/bin/*.so*; do
     if [ -f "$f" ] && [ ! -L "$f" ]; then
-        cp "$f" "$BUNDLE_OUT/lib/"
+        cp "$f" "$BUNDLE_OUT/"
         copy_blobs=$((copy_blobs + 1))
-        case "$(basename "$f")" in libggml-cuda.so*) found_ggml_cuda=1 ;; esac
+        case "$(basename "$f")" in
+            libggml-cpu.so*)  found_cpu=1 ;;
+            libggml-cuda.so*) found_cuda=1 ;;
+        esac
     fi
 done
 [ "$copy_blobs" -gt 0 ] || { echo "FATAL: no real .so blobs in build/bin/"; ls -la build/bin/ | head -30; exit 1; }
-[ "$found_ggml_cuda" = 1 ] || { echo "FATAL: libggml-cuda.so missing from build/bin/ (CUDA backend not built?)"; ls -la build/bin/ | grep -i cuda; exit 1; }
-echo "copied $copy_blobs real .so blobs from build/bin/"
+[ "$found_cpu" = 1 ] || { echo "FATAL: libggml-cpu.so missing from build/bin/ (CPU backend not built?)"; ls -la build/bin/ | grep -i cpu; exit 1; }
+[ "$found_cuda" = 1 ] || { echo "FATAL: libggml-cuda.so missing from build/bin/ (CUDA backend not built?)"; ls -la build/bin/ | grep -i cuda; exit 1; }
+echo "copied $copy_blobs real .so blobs from build/bin/ (flat, next to the binary)"
 
 # CUDA runtime libs: locate the three real versioned blobs libggml-cuda.so
 # NEEDED's (libcudart.so.13, libcublas.so.13, libcublasLt.so.13) in the first
@@ -93,29 +107,17 @@ for want in "libcudart.so.13" "libcublas.so.13" "libcublasLt.so.13"; do
         ls "${CUDA_CANDIDATES[0]}" 2>/dev/null | grep -E 'cudart|cublas' || true
         exit 1
     fi
-    cp "$found" "$BUNDLE_OUT/lib/"
+    cp "$found" "$BUNDLE_OUT/"
     echo "CUDA: $(basename "$found")"
     cuda_copied=$((cuda_copied + 1))
 done
 
-# Rebuild SONAME alias chains as true symlinks (zero bytes on disk):
-#   libfoo.so.0.1.2  ->  libfoo.so.0  ->  libfoo.so
-cd "$BUNDLE_OUT/lib"
-for f in lib*.so.[0-9]*; do
-    [ -e "$f" ] || continue
-    name=$(basename "$f")
-    prefix=${name%%.so.*}
-    rest=${name##*.so.}
-    major=${rest%%.*}
-    link1=${prefix}.so.${major}
-    if [ "$name" != "$link1" ] && [ ! -e "$link1" ]; then
-        ln -s "$name" "$link1"
-    fi
-    if [ ! -e "${prefix}.so" ]; then
-        ln -s "$link1" "${prefix}.so"
-    fi
-done
-cd - >/dev/null
+# NOTE: no SONAME alias symlinks are created here. The build stage emits ONLY
+# the real versioned blobs (libfoo.so.0.1.2). The final bundle stage copies
+# those in and rebuilds the alias chain (libfoo.so.0 -> libfoo.so) as true
+# symlinks in a RUN — because COPY --from MATERIALIZES symlinks into full file
+# copies, so any symlink we make here would become a duplicate of the blob.
+# This is exactly how the image Dockerfile does it.
 
-echo "=== bundle ready: $BUNDLE_OUT ($copy_blobs built blobs + $cuda_copied CUDA libs) ==="
-ls -lah "$BUNDLE_OUT" "$BUNDLE_OUT/lib"
+echo "=== bundle ready (FLAT, real blobs only): $BUNDLE_OUT ($copy_blobs built blobs + $cuda_copied CUDA libs) ==="
+ls -lah "$BUNDLE_OUT"

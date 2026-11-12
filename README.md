@@ -178,12 +178,16 @@ Published assets (per release tag `binary-<semver>`):
 
 - `llama-server-cuda-slim-linux-x86_64-cuda13-sm86-<semver>.tar.zst` (+ `.sha256`)
 
-Extracted layout:
+Extracted layout (FLAT — everything in one directory next to the launcher).
+Flat is required, not just tidy: llama.cpp's backend plugin loader
+(`ggml_backend_load_all`) searches the executable's own directory (and the
+CWD) for `libggml-*.so` — it does not use `LD_LIBRARY_PATH` or subdirs — so
+the backends must sit next to `llama-server`.
 
 ```
 llama-server-run        launcher (LD_LIBRARY_PATH + driver guard + `doctor`)
 llama-server            the binary
-lib/*.so..              llama/ggml closure + CUDA 13 runtime libs
+*.so..                  llama/ggml backends + CUDA 13 runtime libs (flat)
 preset.example.ini      Modelfile-like model-swap preset (INI)
 update.sh               self-update from GitHub Releases (--check / --dry-run)
 VERSION

@@ -5,10 +5,12 @@
 # x86_64 host that has only the NVIDIA kernel driver). No web panel
 # (ui-off). The build uses cmake-flags.sh so it cannot drift from the image.
 #
-# Output layout (the /app of the final "bundle" stage):
-#   llama-server-run       launcher (guard + LD_LIBRARY_PATH)
+# Output layout (the /app of the final "bundle" stage) — FLAT: everything in
+# one directory (llama.cpp's backend plugin loader needs the backends next to
+# the binary, not in a subdir).
+#   llama-server-run       launcher (guard + LD_LIBRARY_PATH + doctor)
 #   llama-server           the binary
-#   lib/*.so..             llama/ggml closure + CUDA 13 runtime libs
+#   *.so..                 llama/ggml backends + CUDA 13 runtime libs (flat)
 #   preset.example.ini
 #   update.sh              self-updater (downloads itself from GitHub Releases)
 #   VERSION
@@ -71,10 +73,38 @@ RUN set -e; \
     && echo "runtime lib aliases OK"
 
 WORKDIR /app
+# Helper files were staged into the build context by CI (see workflow), so they
+# live in the build image at /src; bring them into /app.
+COPY --from=build /src/llama-server-run /src/update.sh /src/preset.example.ini /app/
+# The binary + every real .so blob, flat in /app. /bundle contains ONLY real
+# blobs (no symlinks — bundle.sh copies real files and no longer creates the
+# SONAME alias chain), so *.so* copies each blob exactly once with nothing to
+# materialize. This includes the unversioned backends (libggml-cpu.so,
+# libggml-cuda.so) and impl libs (libllama-server-impl.so) that have no .so.N.
+# The versioned alias chain (libfoo.so.0 -> libfoo.so) is recreated as true
+# symlinks in the next RUN. Mirrors the image (COPY --from /out/*.so* -> /app).
 COPY --from=build /bundle/llama-server /app/llama-server
-COPY --from=build /bundle/lib /app/lib
-COPY llama-server-run update.sh preset.example.ini /app/
-RUN chmod +x /app/llama-server-run /app/llama-server /app/update.sh \
+COPY --from=build /bundle/*.so* /app/
+RUN set -e \
+    && chmod +x /app/llama-server-run /app/llama-server /app/update.sh \
     && echo "${APP_VERSION}" > /app/VERSION \
-    && echo "=== /app (the release payload) ===" \
-    && ls -lah /app && du -sh /app
+    # Rebuild the SONAME alias chain as TRUE symlinks (zero bytes on disk):
+    #   libfoo.so.0.1.2  ->  libfoo.so.0  ->  libfoo.so
+    && cd /app \
+    && for f in lib*.so.[0-9]*; do \
+         name=$(basename "$f"); prefix=${name%%.so.*}; rest=${name##*.so.}; major=${rest%%.*}; \
+         link1=${prefix}.so.${major}; \
+         if [ "$name" != "$link1" ] && [ ! -e "$link1" ]; then ln -s "$name" "$link1"; fi; \
+         if [ ! -e "${prefix}.so" ]; then ln -s "$link1" "${prefix}.so"; fi; \
+       done \
+    && echo "=== /app (the release payload, flat) ===" \
+    && ls -lah /app \
+    # ldd closure check: everything must resolve EXCEPT the host driver
+    # (libcuda.so.1, never bundled). This is the real final runtime env.
+    && for t in /app/llama-server /app/libllama-server-impl.so /app/libggml-cuda.so; do \
+         if LD_LIBRARY_PATH=/app ldd "$t" 2>/dev/null | grep -F "not found" | grep -vF "libcuda.so.1"; then \
+           echo "FATAL: unresolved deps on $t (payload not self-contained)"; LD_LIBRARY_PATH=/app ldd "$t" | grep -F "not found"; exit 1; \
+         fi; \
+       done \
+    && echo "ldd closure: clean (only the host driver may be absent)" \
+    && du -sh /app

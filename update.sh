@@ -11,10 +11,10 @@
 # The release assets are named:
 #   llama-server-cuda-slim-linux-x86_64-cuda13-sm86-<TAG>.tar.zst   (+ .sha256)
 # Installed layout (flat, self-contained — only the NVIDIA driver is required
-# on the host):
+# on the host). Everything lives in ONE directory next to the launcher:
 #   <dir>/llama-server-run       this launcher
 #   <dir>/llama-server           the binary
-#   <dir>/lib/*.so..             llama/ggml + CUDA 13 runtime libs
+#   <dir>/*.so..                 llama/ggml backends + CUDA 13 runtime libs
 #   <dir>/preset.example.ini
 #   <dir>/VERSION
 # ---
@@ -90,9 +90,11 @@ if [ "$current" = "$new_version" ]; then
   echo "no change (already $new_version)"
   exit 0
 fi
-if [ -e "$HERE/llama-server" ] && [ -d "$HERE/lib" ]; then
+# remove the old flat install (binary + every bundled .so, including the
+# SONAME alias symlinks) so the new payload drops in cleanly
+if [ -e "$HERE/llama-server" ]; then
   rm -f "$HERE/llama-server"
-  rm -rf "$HERE/lib"
+  find "$HERE" -maxdepth 1 -name '*.so*' -exec rm -rf {} +
   rm -f "$HERE/VERSION" "$HERE/preset.example.ini" "$HERE/llama-server-run"
 fi
 cp -a "$tmp/extracted/." "$HERE/"

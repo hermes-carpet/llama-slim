@@ -3,9 +3,10 @@
 # llama-server-run — launcher for the self-contained llama-server bundle.
 #
 # What it does (and why it exists):
-#   1. Puts the bundled library dir on LD_LIBRARY_PATH so the host only needs
-#      the NVIDIA kernel driver (libcuda.so.1) — no CUDA toolkit packages, no
-#      apt, no host lib path fiddling. Same host contract as the Docker image.
+#   1. Puts the flat bundle dir on LD_LIBRARY_PATH (binary, backends, and CUDA
+#      toolkit libs all sit next to llama-server) so the host only needs the
+#      NVIDIA kernel driver (libcuda.so.1) — no CUDA toolkit packages, no apt,
+#      no host lib path fiddling. Same host contract as the Docker image.
 #   2. `doctor` subcommand — checks driver, bundled libs, and GPU arch, and
 #      prints an actionable report (so a bad box fails loudly with a fix, not
 #      a cryptic dlopen error).
@@ -25,9 +26,16 @@ set -u
 
 DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
 BIN="$DIR/llama-server"
-LIBDIR="$DIR/lib"
 
-export LD_LIBRARY_PATH="$LIBDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+# Flat layout: the binary, the backend plugins (libggml-cpu.so / libggml-cuda.so),
+# and the CUDA toolkit libs all sit next to llama-server in $DIR.
+#   - LD_LIBRARY_PATH lets the binary's static deps + dlopen'd backends resolve.
+#   - llama.cpp's backend plugin loader (ggml_backend_load_all) searches the
+#     executable's own directory when GGML_BACKEND_DIR is unset at build time
+#     (it is) — that directory is $DIR, so the backends are found no matter
+#     where the user launches from. (Note: GGML_BACKEND_PATH expects a single
+#     backend *file*, not a directory, so we do not set it here.)
+export LD_LIBRARY_PATH="$DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 # ---- subcommands -----------------------------------------------------------
 case "${1:-}" in
@@ -81,11 +89,19 @@ HELP
         echo "=== llama-server-run doctor ==="
         echo "bundle dir : $DIR"
         echo "binary     : $BIN $([ -x "$BIN" ] && echo '(present, executable)' || { echo '(MISSING)'; rc=1; })"
-        echo "lib dir    : $LIBDIR"
+        # the backend plugins must sit next to the binary (llama.cpp's backend
+        # plugin loader searches the executable's own directory)
+        for be in libggml-cpu.so libggml-cuda.so; do
+            if [ -e "$DIR/$be" ]; then
+                echo "  backend $be : OK (next to the binary)"
+            else
+                echo "  backend $be : MISSING from $DIR (rc=1)" >&2; rc=1
+            fi
+        done
         # bundled CUDA toolkit libs must be present
         for lib in libcudart.so.13 libcublas.so.13 libcublasLt.so.13; do
-            if ls "$LIBDIR/$lib"* >/dev/null 2>&1; then
-                echo "  bundled $lib : OK ($(ls "$LIBDIR/$lib"* | xargs -n1 basename | tr '\n' ' '))"
+            if ls "$DIR/$lib"* >/dev/null 2>&1; then
+                echo "  bundled $lib : OK ($(ls "$DIR/$lib"* | xargs -n1 basename | tr '\n' ' '))"
             else
                 echo "  bundled $lib : MISSING (rc=1)" >&2; rc=1
             fi
