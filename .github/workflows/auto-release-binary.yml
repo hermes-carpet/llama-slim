@@ -161,9 +161,17 @@ jobs:
           docker create --name bundlegrab "$STAGE_IMG" true >/dev/null
           docker cp bundlegrab:/app/. payload/
           docker rm -f bundlegrab >/dev/null
-          echo "=== payload (what ships) ==="
-          ls -lah payload payload/lib
+          echo "=== payload (what ships) — FLAT: backends sit next to llama-server ==="
+          ls -lah payload
           du -sh payload
+          # Sanity: the backend plugins MUST be next to the binary (llama.cpp's
+          # backend plugin loader searches the executable's dir, not subdirs /
+          # LD_LIBRARY_PATH). A regression here = 'no backends are loaded'.
+          for be in payload/libggml-cpu.so payload/libggml-cuda.so; do
+            [ -f "$be" ] || { echo "FATAL: $be missing — payload is not flat (backends not next to the binary)"; exit 1; }
+          done
+          [ -d payload/lib ] && { echo "FATAL: payload/lib exists — bundle is not flat again"; exit 1; }
+          echo "flat layout OK"
 
       - name: Download acceptance model (Qwen3.5-9B UD-Q4_K_XL)
         run: |
