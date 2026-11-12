@@ -61,25 +61,11 @@ RUN apt-get update \
 WORKDIR /app
 COPY . .
 
-# Mirrors the official .devops/cuda.Dockerfile config (proven in production):
-# GGML_BACKEND_DL + --allow-shlib-undefined => libcuda.so.1 is needed ONLY at
-# runtime (kernel driver via the container runtime). NCCL: nvidia/cuda:13.x
-# images don't ship it; CMake's FindNCCL warns and skips (single-GPU).
-# Feature/optimization flags come from build_flags.sh (source of truth,
-# shared with the bare-metal bundle so the image and binary never drift).
-# ui-on = embed the prebuilt web UI. Build-environment flags + CUDA arch
-# are appended here; the source dir is the image context (".").
-RUN CMAKE_FEATURE_FLAGS="$(bash -c '. ./build_flags.sh ui-on; printf "%s " "${CMAKE_FLAGS[@]}")" \
-    && ccache -z \
-    && cmake -B build \
-        $CMAKE_FEATURE_FLAGS \
-        -DCMAKE_CUDA_ARCHITECTURES="${CUDA_DOCKER_ARCH}" \
-        -DCMAKE_C_COMPILER_LAUNCHER=ccache \
-        -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-        -DCMAKE_EXE_LINKER_FLAGS=-Wl,--allow-shlib-undefined \
-        . \
-    && cmake --build build --config Release -j"$(nproc)" \
-    && ccache -s \
+# Configure + build via the committed bash script (Docker's RUN runs under
+# /bin/sh, which mis-parses nested quoting; a bash file avoids that and is
+# also testable). CC/CXX/CUDAHOSTCXX + ccache are handled inside the script,
+# which sources build_flags.sh (source-of-truth flag array).
+RUN bash cmake-build.sh ui-on "${CUDA_DOCKER_ARCH}" \
     && mkdir -p /out \
     && cp build/bin/llama-server /out/llama-server \
     && for f in build/bin/*; do \

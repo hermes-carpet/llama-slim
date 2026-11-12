@@ -30,21 +30,15 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # The build context (assembled by CI) = the llama.cpp source tree at top level
-# PLUS the helper files (build_flags.sh, llama-server-run, update.sh,
-# preset.example.ini). Copy it all in; build_flags.sh lives at ./ in the
-# context so the cmake flag-expansion below can source it.
+# PLUS the helper files (build_flags.sh, cmake-build.sh, llama-server-run,
+# update.sh, preset.example.ini). Copy it all in.
 WORKDIR /src
 COPY . .
 
-RUN CMAKE_FEATURE_FLAGS="$(bash -c '. ./build_flags.sh ui-off; printf "%s " "${CMAKE_FLAGS[@]}")" \
-    && cmake -B build \
-        $CMAKE_FEATURE_FLAGS \
-        -DCMAKE_CUDA_ARCHITECTURES="86-real" \
-        -DCMAKE_C_COMPILER_LAUNCHER=ccache \
-        -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-        -DCMAKE_EXE_LINKER_FLAGS=-Wl,--allow-shlib-undefined \
-        . \
-    && cmake --build build --config Release -j"$(nproc)"
+# sm_86 (RTX 30xx, e.g. the RTX 3090) + PTX so newer cards JIT-compile. Build
+# via the shared bash script (Docker RUN runs under /bin/sh; the script avoids
+# quoting pitfalls and is testable).
+RUN bash cmake-build.sh ui-off "86-real"
 
 # Assemble the flat, self-contained bundle in /bundle.
 RUN set -e \
