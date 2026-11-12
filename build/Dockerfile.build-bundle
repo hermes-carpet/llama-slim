@@ -40,35 +40,11 @@ COPY . .
 # quoting pitfalls and is testable).
 RUN bash cmake-build.sh ui-off "86-real"
 
-# Assemble the flat, self-contained bundle in /bundle.
-RUN set -e \
-    && B=/bundle && mkdir -p "$B/lib" \
-    && cp build/bin/llama-server "$B/llama-server" \
-    && chmod +x "$B/llama-server" \
-    # every bundled .so the server + CUDA backend actually need (real files):
-    && for s in libllama-server-impl.so libllama-common.so.0* libllama.so.0*\
-                libggml.so.0* libggml-base.so.0* libggml-cpu.so \
-                libggml-cuda.so libmtmd.so.0*; do \
-         [ -e "build/bin/$s" ] && cp "build/bin/$s" "$B/lib/" || \
-           { echo "FATAL: required blob missing: $s"; ls -la build/bin/ | head; exit 1; }; \
-       done \
-    # CUDA 13 runtime libs (the exact closure libggml-cuda.so links; the
-    # versioned names — update if the CUDA minor moves) + SONAME symlinks:
-    && D=/usr/local/cuda-13.3/targets/x86_64-linux-gnu \
-       ; for lib in libcudart.so.13.3.29 libcublas.so.13.5.1.27 \
-         libcublasLt.so.13.5.1.27; do \
-         [ -f "$D/$lib" ] || { echo "FATAL: $D/$lib missing (CUDA minor moved?)"; ls "$D" | grep -E 'cudart|cublas' | head; exit 1; }; \
-         cp "$D/$lib" "$B/lib/"; \
-       done \
-    && cd "$B/lib" \
-    && for f in lib*.so.[0-9]*; do \
-         name=$(basename "$f"); prefix=${name%%.so.*}; rest=${name##*.so.}; \
-         major=${rest%%.*}; link1=${prefix}.so.${major}; \
-         if [ "$name" != "$link1" ] && [ ! -e "$link1" ]; then ln -s "$name" "$link1"; fi; \
-         if [ ! -e "${prefix}.so" ]; then ln -s "$link1" "${prefix}.so"; fi; \
-       done \
-    && echo "=== bundle lib/ (real blobs + SONAME symlinks) ===" \
-    && ls -lah "$B" "$B/lib"
+# Assemble the flat, self-contained bundle in /bundle via the committed script
+# (testable; avoids /bin/sh + set -e glob pitfalls in an inline RUN).
+RUN env BUNDLE_OUT=/bundle \
+        CUDA_LIB_DIR=/usr/local/cuda-13.3/targets/x86_64-linux-gnu \
+        bash bundle.sh
 
 # Final "bundle" stage: the self-contained /app the workflow tars. Plain
 # debian:stable-slim runtime with exactly what the closure needs.
