@@ -254,6 +254,14 @@ jobs:
           echo "== version file =="
           cat payload/VERSION 2>/dev/null || echo "(no VERSION)"
 
+          # --- install.sh bootstrap (small; shipped alongside the tarballs) ---
+          # This is the install/update script the user curls first; it then
+          # downloads the matching tarball, verifies it, healthchecks it, and
+          # swaps it in. Keep a copy + checksum in the upload dir.
+          chmod +x install.sh
+          sha256sum install.sh > install.sh.sha256
+          echo "install.sh: $(du -h install.sh | cut -f1)  sha256=$(awk '{print $1}' install.sh.sha256)"
+
       - name: Smoke-test the system-cuda (slim) payload on CPU
         run: |
           set -uo pipefail
@@ -283,6 +291,8 @@ jobs:
             build.log
             llama-server-cuda-slim-linux-x86_64-cuda13-sm86-*.tar.zst
             llama-server-cuda-slim-linux-x86_64-cuda13-sm86-*.tar.zst.sha256
+            install.sh
+            install.sh.sha256
           retention-days: 14
           if-no-files-found: error
 
@@ -313,9 +323,12 @@ jobs:
           # self-contained (base name) vs system-cuda (the smaller one).
           asset = f"llama-server-cuda-slim-linux-x86_64-cuda13-sm86-{ver}.tar.zst"
           asset_sys = f"llama-server-cuda-slim-linux-x86_64-cuda13-sm86-system-cuda-{ver}.tar.zst"
-          # Replace the LONGER token (ASSET-NAME-SYS) first, otherwise the
-          # shorter "ASSET-NAME" replace would clobber its prefix.
+          # install.sh bootstrap asset name.
+          install_name = "install.sh"
+          # Replace the LONGEST tokens first (ASSET-NAME-SYS, INSTALL-NAME) so
+          # shorter prefixes (ASSET-NAME) don't clobber them.
           out = t.replace("ASSET-NAME-SYS", asset_sys) \
+                 .replace("INSTALL-NAME", install_name) \
                  .replace("RELEASE-TAG", f"binary-{ver}") \
                  .replace("ASSET-NAME", asset) \
                  .replace("SHORT-SHA", sha[:12]) \
@@ -330,13 +343,13 @@ jobs:
         run: |
           set -euo pipefail
           tag="${REL_PREFIX}-$RELEASE_VERSION"
-          # Both artifacts: self-contained (base name) + system-cuda (slim),
-          # each with its .sha256.
+          # Artifacts: 2 tarballs + 2 checksums (self-contained + system-cuda)
+          # + the install.sh bootstrap + its checksum = 6 files.
           assets=()
-          for f in artifacts/*.tar.zst artifacts/*.tar.zst.sha256; do
+          for f in artifacts/*.tar.zst artifacts/*.tar.zst.sha256 artifacts/install.sh artifacts/install.sh.sha256; do
             [ -f "$f" ] && assets+=("$f")
           done
-          [ "${#assets[@]}" -ge 4 ] || { echo "FATAL: expected 4 release files, found ${#assets[@]}:"; ls -la artifacts; exit 1; }
+          [ "${#assets[@]}" -ge 6 ] || { echo "FATAL: expected 6 release files, found ${#assets[@]}:"; ls -la artifacts; exit 1; }
           echo "publishing tag $tag  (${#assets[@]} files):"
           printf '  %s\n' "${assets[@]}"
 

@@ -14,6 +14,31 @@ Both are built via the same `cmake-flags.sh` as the Docker image; the web panel
 is omitted. The shared `llama-server-run` auto-detects the variant; run
 `llama-server-run doctor` after install to verify the host.
 
+### Quick install (recommended)
+`install.sh` downloads the variant you choose, verifies its sha256, runs a
+model-less `/health` healthcheck, and swaps the payload in — with a pre-swap
+backup of the old install for rollback. It updates an existing install the same
+way (refusing if the service is running).
+```bash
+# fetch the installer for this release
+curl -fL -o install.sh \
+  https://github.com/OWNER-REPO/releases/download/RELEASE-TAG/INSTALL-NAME
+curl -fL -o install.sh.sha256 \
+  https://github.com/OWNER-REPO/releases/download/RELEASE-TAG/INSTALL-NAME.sha256
+sha256sum -c install.sh.sha256
+chmod +x install.sh
+
+# default install dir is /usr/local/bin/llama (override with --dir).
+# pick the smaller one if your host already has a CUDA 13 toolkit:
+sudo ./install.sh install --variant self      # bundles CUDA runtime (driver-only host)
+sudo ./install.sh install --variant system    # smaller; host needs a CUDA 13 toolkit
+# later:  sudo ./install.sh update   (or: --check / --dry-run)
+```
+Configure the install dir + variant persistently in `~/.llama.yml`
+(`path:` and `variant:` keys). The systemd unit, a seed `llama-server.env`
+(set `LLAMA_API_KEY=...`), and a `/usr/local/bin/llama-server` command are all
+created (the existing unit is never overwritten).
+
 ### Features
 - Speculative decode: `--spec-type draft-dflash,draft-mtp`
 - Multi-GPU: `--split-mode {none,layer,row,tensor}`
