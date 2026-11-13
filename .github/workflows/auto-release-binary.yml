@@ -75,11 +75,22 @@ jobs:
         id: latest
         run: |
           set -euo pipefail
-          sha=$(curl -fsSL \
+          # Retry with backoff: the public API (unauthenticated) is rate-limited
+          # and can transiently 403 / 5xx. A single failed curl must not kill
+          # the run when the next attempt would succeed.
+          sha=""
+          for attempt in 1 2 3 4 5; do
+            if resp="$(curl -fsSL --retry 1 \
                   -H "Accept: application/vnd.github+json" \
                   -H "User-Agent: $API_UA" \
-                  https://api.github.com/repos/ggml-org/llama.cpp/commits/master \
-                | python3 -c "import json,sys; print(json.load(sys.stdin)['sha'])")
+                  https://api.github.com/repos/ggml-org/llama.cpp/commits/master)" 2>/dev/null; then
+              sha="$(printf '%s' "$resp" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sha"])' 2>/dev/null || true)"
+              [ -n "$sha" ] && break
+            fi
+            echo "upstream SHA fetch failed (attempt $attempt/5), retrying in $((attempt*10))s..."
+            sleep $((attempt*10))
+          done
+          [ -n "$sha" ] || { echo "FATAL: could not resolve upstream master SHA after 5 attempts"; exit 1; }
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "Upstream master: $sha"
 
