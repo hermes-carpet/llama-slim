@@ -28,7 +28,8 @@ curl -fL -o install.sh.sha256 \
 sha256sum -c install.sh.sha256
 chmod +x install.sh
 
-# default install dir is /usr/local/bin/llama (override with --dir).
+# default install dir is /usr/local/lib/llama (override with --dir).
+# the runnable command is /usr/local/bin/llama (a symlink to the launcher).
 # pick the smaller one if your host already has a CUDA 13 toolkit:
 sudo ./install.sh install --variant self      # bundles CUDA runtime (driver-only host)
 sudo ./install.sh install --variant system    # smaller; host needs a CUDA 13 toolkit
@@ -36,8 +37,16 @@ sudo ./install.sh install --variant system    # smaller; host needs a CUDA 13 to
 ```
 Configure the install dir + variant persistently in `~/.llama.yml`
 (`path:` and `variant:` keys). The systemd unit, a seed `llama-server.env`
-(set `LLAMA_API_KEY=...`), and a `/usr/local/bin/llama-server` command are all
-created (the existing unit is never overwritten).
+(set `LLAMA_API_KEY=...`), and the `/usr/local/bin/llama` command are all
+created (an existing unit is never overwritten).
+
+**Remove a later install:** delete the payload dir and the command:
+```bash
+sudo systemctl stop llama-server   # if the service is running
+sudo rm -rf /usr/local/lib/llama /usr/local/bin/llama
+sudo rm -f /etc/systemd/system/llama-server.service /etc/llama-server/llama-server.env
+sudo systemctl daemon-reload
+```
 
 ### Features
 - Speculative decode: `--spec-type draft-dflash,draft-mtp`

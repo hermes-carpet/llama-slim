@@ -24,7 +24,20 @@
 # ---
 set -u
 
-DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
+SRC="$0"
+# Resolve the command symlink (e.g. /usr/local/bin/llama -> <dir>/llama-server-run)
+# back to the real file, so the payload dir is correct no matter which path the
+# user (or the systemd unit) used. `dirname "$0"` alone would give the symlink's
+# directory, not the real install dir, so the binary/backends wouldn't be found.
+while [ -h "$SRC" ]; do
+  SRC_dir="$(cd -P -- "$(dirname -- "$SRC")" >/dev/null 2>&1 && pwd)"
+  SRC_link="$(readlink "$SRC")"
+  case "$SRC_link" in
+    /*) SRC="$SRC_link" ;;
+    *)  SRC="$SRC_dir/$SRC_link" ;;
+  esac
+done
+DIR="$(cd -P -- "$(dirname -- "$SRC")" >/dev/null 2>&1 && pwd)"
 BIN="$DIR/llama-server"
 
 # Flat layout: the binary, the backend plugins (libggml-cpu.so / libggml-cuda.so),

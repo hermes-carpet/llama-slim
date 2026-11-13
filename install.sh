@@ -12,7 +12,7 @@
 #
 # Where it installs (a DIRECTORY; the launcher is <dir>/llama-server-run):
 #   precedence: --dir > $LLAMA_INSTALL_DIR > ~/.llama.yml > /etc/llama-server/.llama.yml > default
-#   default:    /usr/local/bin/llama
+#   default:    /usr/local/lib/llama   (payload dir; the runnable command is /usr/local/bin/llama)
 # The two YAML files use a single key for the target directory, e.g.
 #       path: /opt/llama          # any of: path / install_dir / install-dir / dir
 #   and may also set  variant: system     # default: self
@@ -39,11 +39,11 @@ set -euo pipefail
 
 REPO="hermes-carpet/llama-slim"
 ASSET_PREFIX="llama-server-cuda-slim-linux-x86_64-cuda13-sm86"
-DEFAULT_DIR="/usr/local/bin/llama"
+DEFAULT_DIR="/usr/local/lib/llama"                # payload dir: binary + libs + launcher
 SERVICE_UNIT="${LLAMA_SERVICE_UNIT:-/etc/systemd/system/llama-server.service}"
 LAUNCHER="llama-server-run"
 BINARY="llama-server"
-BINLINK="${LLAMA_BINLINK:-/usr/local/bin/llama-server}"   # PATH command + unit ExecStart target
+BINLINK="${LLAMA_BINLINK:-/usr/local/bin/llama}"  # runnable command (symlink -> launcher) + unit ExecStart
 ENV_FILE="${LLAMA_ENV_FILE:-/etc/llama-server/llama-server.env}"
 HEALTH_PORT="${LLAMA_HEALTH_PORT:-18600}"
 
@@ -200,7 +200,7 @@ healthcheck_staged() {
 # A live install shows up as one of:
 #   * the raw binary   /opt/llama/llama-server ...   (comm=llama-server, exe in $LOCATION)
 #   * the launcher     /opt/llama/llama-server-run ... (argv0 = launcher path)
-#   * the PATH symlink /usr/local/bin/llama-server ... (argv0 = binlink path)
+#   * the PATH symlink /usr/local/bin/llama ...          (argv0 = binlink path)
 # Match on argv0 / the resolved exe — NOT on a substring of the full cmdline,
 # which would false-positive on any shell or editor merely MENTIONING the name.
 guard_running() {
@@ -442,13 +442,20 @@ UNIT
     step "service unit present -> left unchanged (safekept at $unit_kept)"
   fi
 
-  # --- put a stable command on PATH (never overwrites an existing one) ------
-  # Links to the LAUNCHER (sets up CUDA paths + guards), not the raw binary.
+  # --- put the command on PATH (never overwrites a real file) ----------------
+  # $BINLINK (default /usr/local/bin/llama) is the runnable command; it's a
+  # symlink to the launcher in the payload dir, and the unit's ExecStart.
+  if [ -d "$BINLINK" ] && [ ! -L "$BINLINK" ]; then
+    die "$BINLINK is currently a DIRECTORY (an old install put the payload there). Move it out first, then re-run:
+        sudo systemctl stop llama-server
+        sudo mv $BINLINK ${BINLINK}.old      # or rm -rf it if you want it gone
+        # then re-run:  ./install.sh install"
+  fi
   if [ -e "$BINLINK" ] && [ ! -L "$BINLINK" ]; then
     warn "$BINLINK exists and is not a symlink — leaving it alone; add it to PATH manually."
   else
     if [ -e "$LOCATION/$LAUNCHER" ]; then
-      step "linking $BINLINK -> $LOCATION/$LAUNCHER"
+      step "linking command $BINLINK -> $LOCATION/$LAUNCHER"
       mkdir -p "$(dirname "$BINLINK")" 2>/dev/null \
         || warn "could not create $(dirname "$BINLINK") (need write access, e.g. run with sudo)"
       ln -sf "$LOCATION/$LAUNCHER" "$BINLINK" 2>/dev/null \
