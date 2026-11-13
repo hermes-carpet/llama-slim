@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # ---------------------------------------------------------------------------
 # llama-server-run — launcher for the self-contained llama-server bundle.
 #
@@ -28,14 +28,36 @@ DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
 BIN="$DIR/llama-server"
 
 # Flat layout: the binary, the backend plugins (libggml-cpu.so / libggml-cuda.so),
-# and the CUDA toolkit libs all sit next to llama-server in $DIR.
+# and (in the self-contained variant) the CUDA toolkit libs all sit next to
+# llama-server in $DIR.
 #   - LD_LIBRARY_PATH lets the binary's static deps + dlopen'd backends resolve.
 #   - llama.cpp's backend plugin loader (ggml_backend_load_all) searches the
 #     executable's own directory when GGML_BACKEND_DIR is unset at build time
 #     (it is) — that directory is $DIR, so the backends are found no matter
 #     where the user launches from. (Note: GGML_BACKEND_PATH expects a single
 #     backend *file*, not a directory, so we do not set it here.)
+#
+# Two variants share this launcher:
+#   * self-contained — the CUDA 13 toolkit runtime libs (libcudart/cublas/
+#     cublasLt .so.13) are bundled in $DIR; host needs only the NVIDIA driver.
+#   * system-cuda    — those 3 toolkit libs are NOT bundled; the host's CUDA 13
+#     toolkit provides them (on LD_LIBRARY_PATH / the default ld path).
+#     libggml-cuda.so (the kernel backend) is bundled in BOTH.
 export LD_LIBRARY_PATH="$DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+# Does this bundle carry the CUDA 13 *toolkit* runtime libs?
+bundled_cuda=0
+for _lib in libcudart.so.13 libcublas.so.13 libcublasLt.so.13; do
+    if ls "$DIR/$_lib"* >/dev/null 2>&1; then bundled_cuda=1; fi
+done
+# Can the HOST resolve a given CUDA 13 toolkit lib (for the system-cuda variant)?
+host_has_cuda_lib() {
+    local want="$1"
+    ldconfig -p 2>/dev/null | grep -q "$want" && return 0
+    ls /usr/local/cuda*/lib64/"$want"* >/dev/null 2>&1 && return 0
+    ls /usr/local/cuda*/targets/x86_64-linux*/lib64/"$want"* >/dev/null 2>&1 && return 0
+    return 1
+}
 
 # ---- subcommands -----------------------------------------------------------
 case "${1:-}" in
@@ -86,7 +108,13 @@ HELP
         ;;
     doctor)
         rc=0
+        if [ "$bundled_cuda" = 1 ]; then
+            variant="self-contained (CUDA 13 runtime bundled — host needs only the NVIDIA driver)"
+        else
+            variant="system-cuda (CUDA 13 toolkit from the host — needs a CUDA 13 install)"
+        fi
         echo "=== llama-server-run doctor ==="
+        echo "variant    : $variant"
         echo "bundle dir : $DIR"
         echo "binary     : $BIN $([ -x "$BIN" ] && echo '(present, executable)' || { echo '(MISSING)'; rc=1; })"
         # the backend plugins must sit next to the binary (llama.cpp's backend
@@ -98,12 +126,16 @@ HELP
                 echo "  backend $be : MISSING from $DIR (rc=1)" >&2; rc=1
             fi
         done
-        # bundled CUDA toolkit libs must be present
+        # CUDA 13 *toolkit* runtime libs — where they come from depends on variant
         for lib in libcudart.so.13 libcublas.so.13 libcublasLt.so.13; do
             if ls "$DIR/$lib"* >/dev/null 2>&1; then
                 echo "  bundled $lib : OK ($(ls "$DIR/$lib"* | xargs -n1 basename | tr '\n' ' '))"
+            elif [ "$bundled_cuda" = 1 ]; then
+                echo "  bundled $lib : MISSING (self-contained bundle is incomplete, rc=1)" >&2; rc=1
+            elif host_has_cuda_lib "$lib"; then
+                echo "  host    $lib : OK (resolved from the host CUDA 13 toolkit)"
             else
-                echo "  bundled $lib : MISSING (rc=1)" >&2; rc=1
+                echo "  host    $lib : NOT FOUND — install a CUDA 13 toolkit (or export LD_LIBRARY_PATH to its lib dir, rc=1)" >&2; rc=1
             fi
         done
         # host driver
@@ -135,7 +167,10 @@ HELP
         ;;
 esac
 
-# ---- GPU guard: driver present when a GPU would be requested ---------------
+# ---- GPU guard: when a GPU would be requested, verify the host can satisfy
+# the CUDA backend. Both variants need the DRIVER (libcuda.so.1, always from
+# the host — never bundled). The system-cuda variant ALSO needs the host's
+# CUDA 13 toolkit libs (cudart/cublas/cublasLt), since those aren't bundled.
 gpu_req=1
 prev=""
 for a in "$@"; do
@@ -145,14 +180,12 @@ for a in "$@"; do
     prev="$a"
 done
 if [ "$gpu_req" = "1" ]; then
+    # 1) NVIDIA driver present
     if ! ldconfig -p 2>/dev/null | grep -q 'libcuda\.so\.1' && ! ls /usr/lib/x86_64-linux-gnu/libcuda.so.1 >/dev/null 2>&1; then
         {
             echo "================================================================"
             echo " FATAL: a GPU was requested but the NVIDIA driver (libcuda.so.1)"
-            echo " was not found on this host."
-            echo ""
-            echo " This bundle ships the CUDA toolkit libs (cudart/cublas); it REQUIRES"
-            echo " the host kernel driver. Fixes:"
+            echo " was not found on this host. Fixes:"
             echo "   1. install the NVIDIA driver:  sudo apt install nvidia-driver-<ver>"
             echo "   2. or run CPU-only:           llama-server-run --n-gpu-layers 0 ..."
             echo "   3. or point LD_LIBRARY_PATH at the driver dir, then re-run"
@@ -161,6 +194,33 @@ if [ "$gpu_req" = "1" ]; then
             echo "================================================================"
         } >&2
         exit 1
+    fi
+    # 2) system-cuda variant: host must also have the CUDA 13 toolkit libs
+    if [ "$bundled_cuda" = 0 ]; then
+        missing=()
+        for lib in libcudart.so.13 libcublas.so.13 libcublasLt.so.13; do
+            host_has_cuda_lib "$lib" || missing+=("$lib")
+        done
+        if [ "${#missing[@]}" -gt 0 ]; then
+            {
+                echo "================================================================"
+                echo " FATAL: this is the SYSTEM-CUDA build — it does NOT bundle the"
+                echo " CUDA 13 toolkit runtime libs, and these are missing from the"
+                echo " host's CUDA install:"
+                printf '     %s\n' "${missing[@]}"
+                echo ""
+                echo " Fixes:"
+                echo "   1. install a CUDA 13 toolkit:  sudo apt install cuda-toolkit-13-3"
+                echo "      (or set LD_LIBRARY_PATH to your CUDA lib dir, then re-run)"
+                echo "   2. or use the SELF-CONTAINED asset (no '-system-cuda' in the"
+                echo "      filename), which bundles the CUDA runtime — host driver only"
+                echo "   3. or run CPU-only:  llama-server-run --n-gpu-layers 0 ..."
+                echo ""
+                echo " Run 'llama-server-run doctor' for a full report."
+                echo "================================================================"
+            } >&2
+            exit 1
+        fi
     fi
 fi
 

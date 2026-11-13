@@ -6,8 +6,18 @@
 # minus the web panel (ui-off): spec decode (draft-dflash / draft-mtp),
 # multi-GPU --split-mode, --n-cpu-moe, model swap (--models-dir +
 # --models-preset), KV-cache quant (-ctk/-ctv), --api-key (LLAMA_API_KEY),
-# --jinja + --tools, --sleep-idle-seconds. CUDA 13 runtime libs are bundled;
-# the only host requirement is the NVIDIA kernel driver.
+# --jinja + --tools, --sleep-idle-seconds.
+
+# Two artifacts per release — same compiled binary, same libggml-cuda.so
+# backend, same gate. They differ only in where the CUDA 13 *toolkit* runtime
+# libs (libcudart/libcublas/libcublasLt) come from:
+#   * base asset            — SELF-CONTAINED (CUDA 13 runtime bundled; the host
+#                             only needs the NVIDIA kernel driver)
+#   * ...-system-cuda       — uses the HOST's CUDA 13 toolkit (resolves those
+#                             from the host install; ~80% smaller). The host
+#                             must have a CUDA 13 toolkit on its lib path.
+# The slim payload is derived from the portable one (minus the 3 toolkit libs),
+# so there is ONE compile, not two.
 #
 # Versioning mirrors the image: pure semver resolved from the highest upstream
 # v* tag ancestor of the build SHA (scripts/resolve-semver.py). Release tag =
@@ -213,15 +223,56 @@ jobs:
           fi
           echo "gate passed"
 
-      - name: Package tar.zst + checksum
+      - name: Package tar.zst + checksum (self-contained + system-cuda)
         run: |
           set -euo pipefail
-          asset_name="llama-server-cuda-slim-linux-x86_64-cuda13-sm86-${RELEASE_VERSION}.tar.zst"
-          tar -I zstd -cf "$asset_name" -C payload .
-          sha256sum "$asset_name" > "$asset_name.sha256"
-          ls -lh "$asset_name" "$asset_name.sha256"
-          echo "== version file in payload =="
+          V="$RELEASE_VERSION"
+          BASE="llama-server-cuda-slim-linux-x86_64-cuda13-sm86"
+          # --- self-contained (CUDA 13 runtime bundled) — the primary payload ---
+          tar -I zstd -cf "${BASE}-${V}.tar.zst" -C payload .
+          sha256sum "${BASE}-${V}.tar.zst" > "${BASE}-${V}.tar.zst.sha256"
+
+          # --- system-CUDA (slim): same payload minus the 3 CUDA *toolkit*
+          #     runtime libs (cudart/cublas/cublasLt); the host's CUDA 13
+          #     toolkit provides them at runtime. libggml-cuda.so (the kernel
+          #     backend) STAYS — it is not part of the toolkit. Removing the
+          #     SONAME alias symlinks too, not just the real versioned blobs.
+          cp -a payload payload-slim
+          rm -f payload-slim/libcudart.so* payload-slim/libcublas.so* payload-slim/libcublasLt.so*
+          echo "=== payload-slim (system-cuda; no CUDA toolkit libs) ==="
+          ls -lah payload-slim
+          du -sh payload-slim
+          # the backend must remain; the 3 toolkit libs must be gone
+          [ -f payload-slim/libggml-cuda.so ] || { echo "FATAL: libggml-cuda.so missing from slim"; exit 1; }
+          ls payload-slim/libcudart.so* payload-slim/libcublas.so* payload-slim/libcublasLt.so* >/dev/null 2>&1 \
+            && { echo "FATAL: CUDA toolkit libs still present in slim"; exit 1; } || true
+          tar -I zstd -cf "${BASE}-system-cuda-${V}.tar.zst" -C payload-slim .
+          sha256sum "${BASE}-system-cuda-${V}.tar.zst" > "${BASE}-system-cuda-${V}.tar.zst.sha256"
+
+          echo "=== release payloads ==="
+          ls -lh ${BASE}-*.tar.zst ${BASE}-*.sha256
+          echo "== version file =="
           cat payload/VERSION 2>/dev/null || echo "(no VERSION)"
+
+      - name: Smoke-test the system-cuda (slim) payload on CPU
+        run: |
+          set -uo pipefail
+          # Proves the slim variant boots and serves with NO CUDA toolkit libs
+          # present at all (CPU mode, --n-gpu-layers 0) — the exact host
+          # contract of the system-cuda asset for CPU / no-GPU use.
+          chmod +x payload-slim/llama-server-run payload-slim/llama-server
+          ./payload-slim/llama-server-run --n-gpu-layers 0 \
+            --model /tmp/llama-models/Qwen3.5-9B-UD-Q4_K_XL.gguf \
+            --ctx-size 4096 --host 127.0.0.1 --port 8081 &
+          SPID=$!
+          up=0
+          for i in $(seq 1 120); do
+            if curl -sf --max-time 2 http://127.0.0.1:8081/health >/dev/null; then up=1; echo "slim healthy after ${i}"; break; fi
+            sleep 5
+          done
+          kill "$SPID" 2>/dev/null || true
+          if [ "$up" != 1 ]; then echo "FATAL: system-cuda payload did not reach /health (CPU)"; exit 1; fi
+          echo "slim (system-cuda) CPU smoke passed"
 
       - name: Upload artifacts
         if: always()
@@ -259,8 +310,13 @@ jobs:
           ver, sha = sys.argv[1], sys.argv[2]
           t = open("release-notes-binary.md.tmpl").read()
           repo = "hermes-carpet/llama-slim"
+          # self-contained (base name) vs system-cuda (the smaller one).
           asset = f"llama-server-cuda-slim-linux-x86_64-cuda13-sm86-{ver}.tar.zst"
-          out = t.replace("RELEASE-TAG", f"binary-{ver}") \
+          asset_sys = f"llama-server-cuda-slim-linux-x86_64-cuda13-sm86-system-cuda-{ver}.tar.zst"
+          # Replace the LONGER token (ASSET-NAME-SYS) first, otherwise the
+          # shorter "ASSET-NAME" replace would clobber its prefix.
+          out = t.replace("ASSET-NAME-SYS", asset_sys) \
+                 .replace("RELEASE-TAG", f"binary-{ver}") \
                  .replace("ASSET-NAME", asset) \
                  .replace("SHORT-SHA", sha[:12]) \
                  .replace("OWNER-REPO", repo)
@@ -274,9 +330,15 @@ jobs:
         run: |
           set -euo pipefail
           tag="${REL_PREFIX}-$RELEASE_VERSION"
-          asset=$(find artifacts -name '*.tar.zst' | head -1)
-          sha=$(find artifacts -name '*.tar.zst.sha256' | head -1)
-          echo "publishing tag $tag  asset=$(basename "$asset")"
+          # Both artifacts: self-contained (base name) + system-cuda (slim),
+          # each with its .sha256.
+          assets=()
+          for f in artifacts/*.tar.zst artifacts/*.tar.zst.sha256; do
+            [ -f "$f" ] && assets+=("$f")
+          done
+          [ "${#assets[@]}" -ge 4 ] || { echo "FATAL: expected 4 release files, found ${#assets[@]}:"; ls -la artifacts; exit 1; }
+          echo "publishing tag $tag  (${#assets[@]} files):"
+          printf '  %s\n' "${assets[@]}"
 
           # Idempotent: clear any existing release tag (a stale tag 422s POST).
           # Key off gh's EXIT CODE, not its stdout: on a 404 (tag absent)
@@ -295,12 +357,12 @@ jobs:
 
           gh api -X POST "repos/${GITHUB_REPOSITORY}/releases" \
             -f "tag_name=$tag" \
-            -f "name=llama-server-cuda-slim $RELEASE_VERSION (linux-x86_64, CUDA 13, sm86)" \
+            -f "name=llama-server-cuda-slim $RELEASE_VERSION (linux-x86_64, CUDA 13, sm86) — self-contained + system-cuda" \
             -f "target_commitish=$GITHUB_SHA" \
             -F "prerelease=false" \
             -F "body=@BODY.md"
 
-          gh release upload "$tag" "$asset" "$sha" --clobber
+          gh release upload "$tag" "${assets[@]}" --clobber
           echo "published $tag"
 
       - name: Advance state + commit

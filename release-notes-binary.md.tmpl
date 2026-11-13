@@ -1,8 +1,18 @@
 ## Bare-metal `llama-server` bundle (Linux x86_64, CUDA 13, sm_86)
 
-Self-contained: the CUDA 13 runtime libs are bundled; the host only needs the
-**NVIDIA kernel driver**. No Docker required. All image features are built via
-the same `cmake-flags.sh`; the web panel is omitted.
+Two variants, same binary, same features — choose by host:
+
+- **Self-contained** (`…-sm86-<ver>.tar.zst`) — the CUDA 13 *runtime* libs
+  (cudart/cublas/cublasLt) are bundled. Host needs **only the NVIDIA kernel
+  driver**. No Docker required.
+- **System CUDA** (`…-sm86-system-cuda-<ver>.tar.zst`) — ~80% smaller; it does
+  NOT bundle the CUDA runtime, so the host must have a **CUDA 13 toolkit**
+  installed (its cublas/cublasLt/cudart are used at runtime). Use this if the
+  host already runs a CUDA 13 toolkit.
+
+Both are built via the same `cmake-flags.sh` as the Docker image; the web panel
+is omitted. The shared `llama-server-run` auto-detects the variant; run
+`llama-server-run doctor` after install to verify the host.
 
 ### Features
 - Speculative decode: `--spec-type draft-dflash,draft-mtp`
@@ -15,7 +25,7 @@ the same `cmake-flags.sh`; the web panel is omitted.
 - `--sleep-idle-seconds N`
 - HF: `-hf owner/repo:quant`, `LLAMA_CACHE`, `HF_TOKEN`
 
-### Install
+### Install (self-contained)
 ```bash
 set -e
 curl -fL -o llama-bundle.tar.zst \
@@ -27,6 +37,11 @@ sudo mkdir -p /opt/llama
 sudo tar -C /opt/llama --zstd -xf llama-bundle.tar.zst
 /opt/llama/llama-server-run doctor
 ```
+
+### Install (system CUDA, smaller)
+Same, but download `ASSET-NAME-SYS` (the `-system-cuda-` asset). Requires a
+CUDA 13 toolkit on the host (`sudo apt install cuda-toolkit-13-3`, or export
+`LD_LIBRARY_PATH` to your CUDA lib dir) before a GPU run.
 
 ### Run
 ```bash
