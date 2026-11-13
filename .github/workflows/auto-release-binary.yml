@@ -297,7 +297,7 @@ jobs:
             -f "tag_name=$tag" \
             -f "name=llama-server-cuda-slim $RELEASE_VERSION (linux-x86_64, CUDA 13, sm86)" \
             -f "target_commitish=$GITHUB_SHA" \
-            -f "prerelease=false" \
+            -F "prerelease=false" \
             -F "body=@BODY.md"
 
           gh release upload "$tag" "$asset" "$sha" --clobber
