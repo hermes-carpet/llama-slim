@@ -278,12 +278,19 @@ jobs:
           sha=$(find artifacts -name '*.tar.zst.sha256' | head -1)
           echo "publishing tag $tag  asset=$(basename "$asset")"
 
-          # Idempotent: clear any existing release tag (a stale tag 422s POST)
+          # Idempotent: clear any existing release tag (a stale tag 422s POST).
+          # Key off gh's EXIT CODE, not its stdout: on a 404 (tag absent)
+          # `gh api` exits non-zero AND writes the raw JSON error body to stdout
+          # (the --jq filter is not applied to error responses), so capturing
+          # stdout would put that body into the DELETE path.
           for attempt in 1 2 3; do
-            exists=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/$tag" --jq '.id' 2>/dev/null || echo "")
-            if [ -z "$exists" ]; then break; fi
-            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/$exists"
-            sleep 3
+            if existing_id=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/$tag" --jq '.id' 2>/dev/null); then
+              echo "replacing existing release $existing_id"
+              gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/$existing_id"
+              sleep 3
+            else
+              break   # no existing release (404) — nothing to clear
+            fi
           done
 
           gh api -X POST "repos/${GITHUB_REPOSITORY}/releases" \
