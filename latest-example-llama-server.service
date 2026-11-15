@@ -1,0 +1,28 @@
+[Unit]
+Description=llama.cpp LLM inference server
+After=network-online.target
+RequiresMountsFor=/mnt/ssd
+
+[Service]
+Type=simple
+User=_llama-server
+Group=_llama-server
+SupplementaryGroups=video render
+Restart=on-failure
+RestartSec=5
+
+# SET THIS to 1/4 or 1/3rd of your installed ram
+# MemoryMax=
+
+ExecStart=/usr/local/bin/llama
+
+Environment=LLAMA_CACHE=/mnt/ssd/gguf-models
+Environment=HF_HUB_CACHE=/mnt/ssd/gguf-models
+Environment=HF_HOME=/mnt/ssd/gguf-models
+
+EnvironmentFile=/etc/llama-server/llama-server.env
+Environment=LLAMA_ARG_MODELS_PRESET=/etc/llama-server/models.ini
+#Environment=LLAMA_ARG_MODELS_MAX=1
+
+[Install]
+WantedBy=multi-user.target

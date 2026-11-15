@@ -431,11 +431,12 @@ main() {
   printf '%s\n' "$VARIANT"     > "$LOCATION/VARIANT"
   step "payload swapped (v$new_version)"
 
-  # --- systemd unit: install ONLY if absent ----------------------------------
+  # --- systemd unit: install the default unit ONLY if none already exists ----
   # ExecStart + the PATH command run the LAUNCHER (not the raw binary): it sets
   # LD_LIBRARY_PATH, auto-detects the variant, and runs the doctor/GPU guards.
-  # seed the env file (optional at runtime: the unit uses EnvironmentFile=-),
-  # so 'systemctl start' works immediately. Only created if absent.
+  # The unit mirrors latest-example-llama-server.service (repo root) — keep the
+  # two in sync. seed the env file the unit loads via EnvironmentFile, so
+  # 'systemctl start' works immediately. Only created if absent.
   if [ ! -f "$ENV_FILE" ]; then
     step "seeding $ENV_FILE (optional env; edit to set LLAMA_API_KEY etc.)"
     mkdir -p "$(dirname "$ENV_FILE")"
@@ -449,24 +450,51 @@ main() {
 ENV
   fi
 
-  if [ ! -f "$SERVICE_UNIT" ]; then
-    step "service unit absent -> installing $SERVICE_UNIT (ExecStart=$BINLINK)"
+  # Install the default unit (latest-example-llama-server.service) ONLY if no
+  # *llama*.service* file exists in any place a unit could live: the home dir,
+  # /etc/llama-server, and /etc/systemd/system. Never clobber a unit the user
+  # already has (the "only if absent" rule, broadened to those three locations).
+  existing_units="$(
+    for d in "$HOME" /etc/llama-server /etc/systemd/system; do
+      [ -d "$d" ] || continue
+      find "$d" -maxdepth 1 -name '*llama*.service*' 2>/dev/null
+    done
+  )"
+  if [ -n "$existing_units" ]; then
+    say "  existing llama service file(s) found -> NOT modifying:"
+    printf '    %s\n' $existing_units
+    [ -n "$unit_kept" ] && say "  (safekept at $unit_kept)"
+    say "  the default unit is latest-example-llama-server.service; to install it, remove"
+    say "  the file(s) above (or point LLAMA_SERVICE_UNIT to a new path) and re-run."
+  else
+    step "no *llama*.service* found -> installing $SERVICE_UNIT (ExecStart=$BINLINK)"
     mkdir -p "$(dirname "$SERVICE_UNIT")"
     cat > "$SERVICE_UNIT" <<UNIT
 [Unit]
 Description=llama.cpp LLM inference server
 After=network-online.target
+RequiresMountsFor=/mnt/ssd
 
 [Service]
+Type=simple
 User=_llama-server
 Group=_llama-server
+SupplementaryGroups=video render
+Restart=on-failure
+RestartSec=5
+
+# SET THIS to 1/4 or 1/3rd of your installed ram
+# MemoryMax=
 
 ExecStart=${BINLINK}
-WorkingDirectory=${LOCATION}
 
-Environment=LLAMA_CACHE=/mnt/ssd/llama-server
+Environment=LLAMA_CACHE=/mnt/ssd/gguf-models
+Environment=HF_HUB_CACHE=/mnt/ssd/gguf-models
+Environment=HF_HOME=/mnt/ssd/gguf-models
+
+EnvironmentFile=${ENV_FILE}
 Environment=LLAMA_ARG_MODELS_PRESET=/etc/llama-server/models.ini
-EnvironmentFile=-${ENV_FILE}
+#Environment=LLAMA_ARG_MODELS_MAX=1
 
 [Install]
 WantedBy=multi-user.target
@@ -474,9 +502,9 @@ UNIT
     if command -v systemctl >/dev/null 2>&1; then
       systemctl daemon-reload >/dev/null 2>&1 || true
       step "systemd: daemon-reloaded. enable with:  systemctl enable --now llama-server"
+    else
+      step "systemd not available — unit written to $SERVICE_UNIT"
     fi
-  else
-    step "service unit present -> left unchanged (safekept at $unit_kept)"
   fi
 
   # --- put the command on PATH (never overwrites a real file) ----------------

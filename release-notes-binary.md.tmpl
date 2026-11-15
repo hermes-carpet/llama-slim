@@ -39,9 +39,11 @@ sudo ./install.sh install                    # auto-detects the right variant
 # later:  sudo ./install.sh update   (or: --check / --dry-run)
 ```
 Configure the install dir + variant persistently in `~/.llama.yml`
-(`path:` and `variant:` keys). The systemd unit, a seed `llama-server.env`
-(set `LLAMA_API_KEY=...`), and the `/usr/local/bin/llama` command are all
-created (an existing unit is never overwritten).
+(`path:` and `variant:` keys). The default systemd unit
+(`latest-example-llama-server.service`), a seed `llama-server.env` (set
+`LLAMA_API_KEY=...`), and the `/usr/local/bin/llama` command are all created.
+The unit is installed ONLY if no `*llama*.service*` file already exists in the
+home dir, `/etc/llama-server`, or `/etc/systemd/system` (never clobbered).
 
 **Remove a later install:** delete the payload dir and the command:
 ```bash
