@@ -1,6 +1,7 @@
 ## Bare-metal `llama-server` bundle (Linux x86_64, CUDA 13, sm_86)
 
-Two variants, same binary, same features — choose by host:
+Two variants, same binary, same features — `install.sh` auto-picks by host
+(or override with `--variant self|system`):
 
 - **Self-contained** (`…-sm86-<ver>.tar.zst`) — the CUDA 13 *runtime* libs
   (cudart/cublas/cublasLt) are bundled. Host needs **only the NVIDIA kernel
@@ -30,9 +31,11 @@ chmod +x install.sh
 
 # default install dir is /usr/local/lib/llama (override with --dir).
 # the runnable command is /usr/local/bin/llama (a symlink to the launcher).
-# pick the smaller one if your host already has a CUDA 13 toolkit:
-sudo ./install.sh install --variant self      # bundles CUDA runtime (driver-only host)
-sudo ./install.sh install --variant system    # smaller; host needs a CUDA 13 toolkit
+# variant is AUTO-DETECTED: `system` (smaller) if the host has a CUDA 13
+# toolkit, else `self` (bundles the CUDA runtime, driver-only host).
+# override either way with --variant self|system:
+sudo ./install.sh install                    # auto-detects the right variant
+# sudo ./install.sh install --variant system # force the smaller host-CUDA build
 # later:  sudo ./install.sh update   (or: --check / --dry-run)
 ```
 Configure the install dir + variant persistently in `~/.llama.yml`

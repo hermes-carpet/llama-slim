@@ -15,11 +15,15 @@
 #   default:    /usr/local/lib/llama   (payload dir; the runnable command is /usr/local/bin/llama)
 # The two YAML files use a single key for the target directory, e.g.
 #       path: /opt/llama          # any of: path / install_dir / install-dir / dir
-#   and may also set  variant: system     # default: self
+#   and may also set  variant: system|self   # default: auto (see below)
 #
 # Variants (same binary + features; differ only in the bundled CUDA runtime):
-#   self    (default)  CUDA 13 runtime bundled -> host needs only the NVIDIA driver
-#   system                 CUDA 13 toolkit from the host -> ~90% smaller archive
+#   self    CUDA 13 runtime bundled -> host needs only the NVIDIA driver
+#   system  CUDA 13 toolkit from the host -> ~90% smaller archive
+#   default: AUTO-DETECTED — `system` when the host already has the CUDA 13
+#            toolkit (libcudart/cublas/cublasLt .so.13), else `self`.
+#            An existing install keeps its variant on update.
+#            Override: --variant self|system, or `variant:` in the YAML.
 #
 # Safety:
 #   * the release .sha256 is verified locally (sha256sum, else openssl); if
@@ -149,6 +153,31 @@ resolve_location() {
   LOCATION="$DEFAULT_DIR"; LOCATION_SRC="default"
 }
 
+# --- host CUDA toolkit detection (for AUTO variant selection) ---------------
+# host_lib_present SONAME -> 0 if the host can resolve $SONAME (linker cache or
+#   the usual CUDA lib dirs), 1 otherwise. Used ONLY to pick the DEFAULT
+#   variant on a fresh install; an explicit --variant / yaml / existing-install
+#   always takes precedence (resolved before this is ever consulted).
+host_lib_present() {
+  local lib="$1" d
+  if ldconfig -p 2>/dev/null | grep -qF "$lib"; then return 0; fi
+  for d in /usr/local/cuda-*/lib64 /usr/local/cuda/lib64 \
+           /usr/lib/x86_64-linux-gnu /usr/lib64 /usr/local/lib; do
+    [ -e "$d/$lib" ] && return 0
+  done
+  return 1
+}
+# host_cuda_toolkit_ok -> 0 if the host exposes the CUDA 13 *toolkit* runtime
+#   the system-cuda build links against (libcudart/cublas/cublasLt .so.13).
+#   NOTE: this is the toolkit (dev libs), NOT the NVIDIA driver (libcuda.so.1).
+#   A host with only the driver is a `self` (self-contained) host.
+host_cuda_toolkit_ok() {
+  host_lib_present libcudart.so.13   || return 1
+  host_lib_present libcublas.so.13   || return 1
+  host_lib_present libcublasLt.so.13 || return 1
+  return 0
+}
+
 resolve_variant() {
   local v
   if [ -n "$OPT_VARIANT" ]; then VARIANT="$OPT_VARIANT"; VARIANT_SRC="--variant flag"; return; fi
@@ -157,9 +186,17 @@ resolve_variant() {
   v="$(yaml_get "/etc/llama-server/.llama.yml" 'variant')"
   [ -n "$v" ] && { VARIANT="$v"; VARIANT_SRC="/etc/llama-server/.llama.yml"; return; }
   # if updating an existing install, keep whatever variant is already there
+  # (never silently flip self<->system on an update)
   if [ -f "$LOCATION/VARIANT" ] && [ -z "${VARIANT:-}" ]; then
     VARIANT="$(cat "$LOCATION/VARIANT")"; VARIANT_SRC="existing install"; return; fi
-  VARIANT="self"; VARIANT_SRC="default"
+  # Fresh install, no explicit choice: AUTO-DETECT (whisper-style). Prefer the
+  # smaller `system` build when the host already has the CUDA 13 toolkit, else
+  # bundle the CUDA runtime (`self`, driver-only host). Override: --variant.
+  if host_cuda_toolkit_ok; then
+    VARIANT="system"; VARIANT_SRC="auto: host has CUDA 13 toolkit"
+  else
+    VARIANT="self"; VARIANT_SRC="auto: no CUDA 13 toolkit (driver-only host)"
+  fi
 }
 
 # --- model-less healthcheck of a staged payload --------------------------------
